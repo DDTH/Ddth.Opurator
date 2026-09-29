@@ -1,7 +1,7 @@
 name: "CodeQL config"
 
 paths-ignore:
-  - 'Ddth.Opurator.Mylib.Tests/**'
+  - 'Ddth.Opurator.Tests/**'
 
 queries:
   - uses: security-and-quality

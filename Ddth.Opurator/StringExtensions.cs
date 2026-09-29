@@ -1,4 +1,4 @@
-namespace Ddth.Opurator.Mylib;
+namespace Ddth.Opurator;
 
 /// <summary>
 /// Extension methods for <see cref="string"/>.

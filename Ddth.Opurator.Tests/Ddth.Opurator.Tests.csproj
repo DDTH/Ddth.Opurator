@@ -29,7 +29,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Ddth.Opurator.Mylib\Ddth.Opurator.Mylib.csproj" />
+        <ProjectReference Include="..\Ddth.Opurator\Ddth.Opurator.csproj" />
     </ItemGroup>
 
 </Project>

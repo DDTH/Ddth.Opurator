@@ -7,9 +7,9 @@
     </PropertyGroup>
 
     <PropertyGroup>
-        <PackageId>Ddth.Opurator.Mylib</PackageId>
+        <PackageId>Ddth.Opurator</PackageId>
         <PackageVersion>0.0.0</PackageVersion>
-        <Title>Ddth.Opurator.Mylib</Title>
+        <Title>Ddth.Opurator</Title>
         <Authors>semi-colon (;) separated list of authors</Authors>
         <Description>Short description ob the library.</Description>
         <PackageTags>common, utility</PackageTags>

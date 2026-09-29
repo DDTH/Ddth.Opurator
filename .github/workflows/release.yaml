@@ -14,7 +14,7 @@ env:
   TAG_PREFIX: 'v'
   FILE_CHANGELOG: 'RELEASE-NOTES.md'
   DOTNET_VERSION: '6.x'
-  NUGET_PROJECT_FILE: 'Ddth.Opurator.Mylib/Ddth.Opurator.Mylib.csproj'
+  NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
 
 jobs:
   CallCI:

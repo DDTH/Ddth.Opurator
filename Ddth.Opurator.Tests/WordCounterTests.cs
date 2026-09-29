@@ -1,6 +1,6 @@
-using Ddth.Opurator.Mylib;
+using Ddth.Opurator;
 
-namespace Ddth.Opurator.Mylib.Tests;
+namespace Ddth.Opurator.Tests;
 
 public class WordCounterTests
 {

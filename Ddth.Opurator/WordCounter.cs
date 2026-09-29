@@ -1,4 +1,4 @@
-namespace Ddth.Opurator.Mylib;
+namespace Ddth.Opurator;
 
 /// <summary>
 /// Provides word counting functionality.
