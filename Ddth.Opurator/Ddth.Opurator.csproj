@@ -10,17 +10,17 @@
         <PackageId>Ddth.Opurator</PackageId>
         <PackageVersion>0.0.0</PackageVersion>
         <Title>Ddth.Opurator</Title>
-        <Authors>semi-colon (;) separated list of authors</Authors>
-        <Description>Short description ob the library.</Description>
-        <PackageTags>common, utility</PackageTags>
-        <PackageProjectUrl>https://github.com/github-org/github-repo</PackageProjectUrl>
+        <Authors>DDTH</Authors>
+        <Description>Lightweight in-process background task scheduling for .NET.</Description>
+        <PackageTags>background-tasks;task-scheduler;concurrency</PackageTags>
+        <PackageProjectUrl>https://github.com/DDTH/Ddth.Opurator</PackageProjectUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <Copyright>Copyright (c) year author</Copyright>
+        <Copyright>Copyright (c) DDTH</Copyright>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <PropertyGroup>
-        <RepositoryUrl>https://github.com/github-org/github-repo</RepositoryUrl>
+        <RepositoryUrl>https://github.com/DDTH/Ddth.Opurator</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
     </PropertyGroup>
 

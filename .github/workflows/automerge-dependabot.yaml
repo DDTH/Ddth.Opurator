@@ -1,6 +1,7 @@
 # Automatically merge PRs from dependabot
 
 name: "automerge-dependabot"
+
 on:
   workflow_run:
     workflows: [ "ci" ]

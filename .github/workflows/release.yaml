@@ -1,6 +1,7 @@
 # Automatically release a new version when a PR is merged to branch `release`
 
 name: 'release'
+
 on:
   pull_request:
     types: [ closed ]
@@ -66,12 +67,12 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-      ## New NuGet flow using Trusted publishing
-      # - name: NuGet login (OIDC → temp API key)
-      #   uses: NuGet/login@v1
-      #   id: nuget_login
-      #   with:
-      #     user: ${{ secrets.NUGET_USER }}
+      # New NuGet flow using Trusted publishing
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ secrets.NUGET_USER }}
       - name: Update NuGet metadata
         uses: actions/github-script@v9
         env:
@@ -117,8 +118,7 @@ jobs:
           mv -f ${{ env.NUGET_PROJECT_FILE }}.final ${{ env.NUGET_PROJECT_FILE }}
           cat ${{ env.NUGET_PROJECT_FILE }}
           dotnet pack --configuration=Release -o ./
-          dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ secrets.NUGET_API_KEY }}
-          # dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+          dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
           mv -f ${{ env.NUGET_PROJECT_FILE }}.bak ${{ env.NUGET_PROJECT_FILE }}
 
           echo ========== commit updates ==========
