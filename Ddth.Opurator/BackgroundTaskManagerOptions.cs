@@ -6,7 +6,7 @@ namespace Ddth.Opurator;
 public sealed class BackgroundTaskManagerOptions
 {
     /// <summary>
-    /// Gets the maximum number of task invocations that may run concurrently.
+    /// Gets or sets the maximum number of task invocations that may run concurrently.
     /// </summary>
-    public int MaxConcurrency { get; init; } = Math.Max(2, Environment.ProcessorCount * 2);
+    public int MaxConcurrency { get; set; } = Math.Max(2, Environment.ProcessorCount * 2);
 }

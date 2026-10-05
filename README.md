@@ -3,22 +3,24 @@
 [![codecov](https://codecov.io/gh/DDTH/Ddth.Opurator/graph/badge.svg)](https://codecov.io/gh/DDTH/Ddth.Opurator)
 [![Release](https://img.shields.io/github/release/DDTH/Ddth.Opurator.svg?style=flat-square)](RELEASE-NOTES.md)
 
-# Ddth.Opurator
-
-Ddth.Opurator is a lightweight in-process background task manager for .NET. It
+**Ddth.Opurator** is a lightweight in-process background task manager for .NET. It
 runs delayed, one-shot, and repeated asynchronous operations with bounded
 concurrency, status tracking, cooperative cancellation, and per-run timeouts.
 
 ## Features
 
-- Global concurrency limit, defaulting to `max(2, processor count * 2)`
-- Delayed one-shot tasks with optional typed results
-- Repeated tasks with independent per-run timeouts
-- Fixed delays measured from one run's completion to the next run
-- Extensible repeat schedules through `IRepeatSchedule`
-- Queryable status, timestamps, run history, exceptions, and results
-- Cancellation by task ID and graceful manager shutdown
-- No overlapping invocations of the same repeated task
+- **Bounded asynchronous execution:** runs background operations in-process
+  while limiting concurrent work.
+- **One-shot and recurring scheduling:** supports immediate or delayed one-shot
+  tasks and repeated tasks with fixed or custom schedules.
+- **Safe recurring execution:** prevents overlapping runs and applies timeout
+  and failure handling independently to each invocation.
+- **Typed results and runtime visibility:** exposes completion results, status,
+  timestamps, run history, and exceptions through task handles and snapshots.
+- **Controlled lifecycle:** provides cooperative cancellation and graceful
+  asynchronous shutdown for registered operations.
+- **Built-in dependency injection:** registers an application-wide manager for
+  container-managed lifetime in ASP.NET Core and Blazor WebAssembly applications.
 
 ## Installation
 
@@ -26,7 +28,44 @@ concurrency, status tracking, cooperative cancellation, and per-run timeouts.
 dotnet add package Ddth.Opurator
 ```
 
-## One-shot tasks
+## Quick guide
+
+Applications using `Microsoft.Extensions.DependencyInjection`, including ASP.NET
+Core and Blazor WebAssembly applications, can register one application-wide
+manager:
+
+```csharp
+builder.Services.AddOpurator();
+```
+
+Inject `IBackgroundTaskManager` where tasks are scheduled. The service provider
+owns the singleton manager and shuts it down when the application is disposed.
+
+For applications without dependency injection, create and dispose a manager
+directly:
+
+```csharp
+await using var manager = new BackgroundTaskManager();
+
+var handle = manager.RunOnce(
+    async cancellationToken =>
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        return "completed";
+    },
+    new RunOnceOptions
+    {
+        Timeout = TimeSpan.FromSeconds(10)
+    });
+
+Console.WriteLine(await handle.Completion);
+```
+
+Use `RunOnce` for individual work items and `RunRepeatedly` for recurring work.
+Keep the manager alive for as long as its registered tasks should run, and
+dispose it during application shutdown.
+
+### One-shot tasks
 
 ```csharp
 await using var manager = new BackgroundTaskManager();
@@ -51,7 +90,7 @@ Console.WriteLine($"{handle.Id}: {result}");
 The same result can be retrieved later with `TryGetResult<TResult>` while the
 registration remains tracked.
 
-## Repeated tasks
+### Repeated tasks
 
 ```csharp
 var handle = manager.RunRepeatedly(
@@ -89,7 +128,7 @@ positive delay when continuous execution would create a tight loop.
 For schedules other than a fixed post-run delay, implement `IRepeatSchedule`.
 Returning `null` from `GetNextOccurrence` completes the registration.
 
-## Querying and cleanup
+### Querying and cleanup
 
 ```csharp
 if (manager.TryGetSnapshot(handle.Id, out var snapshot))
@@ -106,7 +145,7 @@ manager.TryRemove(handle.Id);
 Statuses include `Scheduled`, `Queued`, `Running`,
 `CancellationRequested`, `Completed`, `Canceled`, `TimedOut`, and `Failed`.
 
-## Cancellation and shutdown
+### Cancellation and shutdown
 
 Cancellation and timeout are cooperative. The supplied delegate must observe
 its `CancellationToken`. If it ignores cancellation, the invocation continues
