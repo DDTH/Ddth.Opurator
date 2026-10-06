@@ -26,6 +26,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+      - name: Setup required .NET ${{ env.DOTNET_VERSION }} # always install the min .NET version required by the package
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Setup .NET ${{ matrix.dotnet }}
         uses: actions/setup-dotnet@v6
         with:
