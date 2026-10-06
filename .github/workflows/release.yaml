@@ -131,9 +131,9 @@ jobs:
               mode: 0o600
             });
 
-            console.log('NuGet metadata prepared.');
-            console.log(`Release version: ${version}`);
-            console.log(`Release notes size: ${releaseNotesSize} UTF-8 bytes`);
+            console.log('ℹ️ NuGet metadata prepared.');
+            console.log(`ℹ️ Release version: ${version}`);
+            console.log(`ℹ️ Release notes size: ${releaseNotesSize} UTF-8 bytes`);
       - name: Publish NuGet package
         env:
           VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}

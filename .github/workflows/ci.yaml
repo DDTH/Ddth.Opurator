@@ -156,9 +156,9 @@ jobs:
               mode: 0o600
             });
 
-            console.log('NuGet metadata prepared.');
-            console.log(`Release version: ${version}`);
-            console.log(`Release notes size: ${releaseNotesSize} UTF-8 bytes`);
+            console.log('ℹ️ NuGet metadata prepared.');
+            console.log(`ℹ️ Release version: ${version}`);
+            console.log(`ℹ️ Release notes size: ${releaseNotesSize} UTF-8 bytes`);
       - name: Build NuGet package
         env:
           VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
@@ -190,3 +190,4 @@ jobs:
             echo "❌ NuGet package ${FILE_TO_CHECK} does not exist."
             exit 1
           fi
+          echo "✅ NuGet package ${FILE_TO_CHECK} exists."
