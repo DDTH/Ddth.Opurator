@@ -22,55 +22,50 @@ concurrency, status tracking, cooperative cancellation, and per-run timeouts.
 - **Built-in dependency injection:** registers an application-wide manager for
   container-managed lifetime in ASP.NET Core and Blazor WebAssembly applications.
 
-## Installation
+## Quick User Guide
+
+### Installation
+
+Install the latest stable version:
 
 ```sh
 dotnet add package Ddth.Opurator
 ```
 
-## Quick guide
+To install a specific version, replace `<version>` with the required release:
 
-Applications using `Microsoft.Extensions.DependencyInjection`, including ASP.NET
-Core and Blazor WebAssembly applications, can register one application-wide
-manager:
+```sh
+dotnet add package Ddth.Opurator --version <version>
+```
+
+### Register or create the task manager
+
+For applications using dependency injection, register one application-wide
+`IBackgroundTaskManager`:
 
 ```csharp
 builder.Services.AddOpurator();
 ```
 
-Inject `IBackgroundTaskManager` where tasks are scheduled. The service provider
-owns the singleton manager and shuts it down when the application is disposed.
+Inject `IBackgroundTaskManager` into services that schedule or inspect tasks.
+The service provider owns the manager's lifetime.
 
-For applications without dependency injection, create and dispose a manager
+For applications without dependency injection, create and dispose the manager
 directly:
 
 ```csharp
 await using var manager = new BackgroundTaskManager();
-
-var handle = manager.RunOnce(
-    async cancellationToken =>
-    {
-        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
-        return "completed";
-    },
-    new RunOnceOptions
-    {
-        Timeout = TimeSpan.FromSeconds(10)
-    });
-
-Console.WriteLine(await handle.Completion);
 ```
 
-Use `RunOnce` for individual work items and `RunRepeatedly` for recurring work.
-Keep the manager alive for as long as its registered tasks should run, and
-dispose it during application shutdown.
+The following examples assume an available task manager named `manager`.
 
 ### One-shot tasks
 
-```csharp
-await using var manager = new BackgroundTaskManager();
+Use `RunOnce` for an operation that should execute only once. It can run
+immediately or after a delay and can optionally return a typed result:
 
-var handle = manager.RunOnce(
+```csharp
+var oneShotHandle = manager.RunOnce(
     async cancellationToken =>
     {
         await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
@@ -82,18 +77,24 @@ var handle = manager.RunOnce(
         Timeout = TimeSpan.FromSeconds(10)
     });
 
-var result = await handle.Completion;
-Console.WriteLine($"{handle.Id}: {result}");
+var result = await oneShotHandle.Completion;
+Console.WriteLine($"{oneShotHandle.Id}: {result}");
 ```
 
-`BackgroundTaskHandle<TResult>.Completion` provides the type-safe result.
-The same result can be retrieved later with `TryGetResult<TResult>` while the
-registration remains tracked.
+`Delay` controls when the task becomes eligible to run, while `Timeout` applies
+to the operation itself. Omit `Delay` to run immediately. Use the non-generic
+`RunOnce` overload when no result is required.
+
+`BackgroundTaskHandle<TResult>.Completion` provides the type-safe result. The
+same result remains available through `TryGetResult<TResult>` until the
+registration is removed or the manager is disposed.
 
 ### Repeated tasks
 
+Use `RunRepeatedly` for recurring work:
+
 ```csharp
-var handle = manager.RunRepeatedly(
+var repeatedHandle = manager.RunRepeatedly(
     async cancellationToken =>
     {
         await RefreshCacheAsync(cancellationToken);
@@ -104,57 +105,80 @@ var handle = manager.RunRepeatedly(
         Timeout = TimeSpan.FromSeconds(30),
         DelayBetweenRuns = TimeSpan.FromMinutes(1)
     });
-
-// Request cancellation without blocking for the delegate to exit.
-manager.RequestCancellation(handle.Id);
-
-try
-{
-    await handle.Completion;
-}
-catch (OperationCanceledException)
-{
-    // The repeated registration has stopped.
-}
 ```
 
-Repeated tasks do not overlap themselves. By default, a failed or timed-out
-run is recorded and the next run is scheduled normally. Set
-`RepeatOptions.FailurePolicy` to `RepeatFailurePolicy.Stop` to stop after an
-exception. Timeouts always continue unless the registration is canceled.
-A zero delay requeues the task immediately, so callers should configure a
-positive delay when continuous execution would create a tight loop.
+`InitialDelay` controls the first run. `DelayBetweenRuns` is measured from one
+run's completion to the next run, and `Timeout` applies independently to every
+run. Invocations from the same registration never overlap.
 
-For schedules other than a fixed post-run delay, implement `IRepeatSchedule`.
-Returning `null` from `GetNextOccurrence` completes the registration.
+By default, failed and timed-out runs are recorded and the registration
+continues. Set `FailurePolicy` to `RepeatFailurePolicy.Stop` to stop after an
+exception. Use a positive delay to avoid a tight execution loop.
+
+For schedules other than a fixed post-run delay, implement `IRepeatSchedule`
+and assign it to `RepeatOptions.Schedule`. Returning `null` from
+`GetNextOccurrence` completes the registration.
 
 ### Querying and cleanup
 
+Use a task ID to inspect the latest state, retrieve a completed typed result,
+or remove a terminal registration:
+
 ```csharp
-if (manager.TryGetSnapshot(handle.Id, out var snapshot))
+if (manager.TryGetSnapshot(oneShotHandle.Id, out var snapshot))
 {
     Console.WriteLine(snapshot.Status);
+    Console.WriteLine(snapshot.RunCount);
     Console.WriteLine(snapshot.LastRun?.Outcome);
 }
 
-// Terminal registrations retain their status/result until explicitly removed
-// or until the manager is discarded.
-manager.TryRemove(handle.Id);
+if (manager.TryGetResult<int>(oneShotHandle.Id, out var result))
+{
+    Console.WriteLine(result);
+}
+
+manager.TryRemove(oneShotHandle.Id);
 ```
 
 Statuses include `Scheduled`, `Queued`, `Running`,
 `CancellationRequested`, `Completed`, `Canceled`, `TimedOut`, and `Failed`.
+`TryRemove` succeeds only for a terminal registration. Until it is removed,
+the manager retains its snapshot, result, or exception in memory.
 
 ### Cancellation and shutdown
 
-Cancellation and timeout are cooperative. The supplied delegate must observe
-its `CancellationToken`. If it ignores cancellation, the invocation continues
-to occupy its concurrency slot, and a repeated task will not start another
-overlapping run.
+Request cancellation by task ID without blocking for a running operation to
+exit:
 
-Disposing the manager stops accepting new registrations, requests cancellation
-for existing registrations, and waits for running delegates to exit. All
-statuses and results are in-memory and are lost when the process exits.
+```csharp
+var cancellationResult = manager.RequestCancellation(repeatedHandle.Id);
+Console.WriteLine(cancellationResult);
+
+try
+{
+    await repeatedHandle.Completion;
+}
+catch (OperationCanceledException)
+{
+    // The registration has stopped.
+}
+```
+
+Cancellation and timeout are cooperative. Each operation must observe its
+`CancellationToken`; otherwise it continues to occupy a concurrency slot until
+it exits.
+
+For a manager created without dependency injection, `await using` shuts it down
+automatically. To stop it earlier, call:
+
+```csharp
+await manager.ShutdownAsync();
+```
+
+Applications using dependency injection should let the service provider dispose
+the manager. Shutdown stops accepting new tasks, requests cancellation for
+existing registrations, and waits for running operations to exit. All task
+state is in memory and is lost when the application exits or reloads.
 
 ## License
 
