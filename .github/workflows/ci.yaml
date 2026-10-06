@@ -13,6 +13,8 @@ permissions:
 
 env:
   TAG_PREFIX: v
+  DOTNET_VERSION: '6.x'
+  NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
 
 jobs:
   BuildAndTest:
@@ -24,10 +26,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Setup .NET 6.x # min .NET required by this project is 6.x
-        uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: '6.x'
       - name: Setup .NET ${{ matrix.dotnet }}
         uses: actions/setup-dotnet@v6
         with:
@@ -84,3 +82,99 @@ jobs:
           branches: ${{ github.ref_name }}
           tag-prefix: ${{ env.TAG_PREFIX }}
           tag-only: true
+
+  TestNuGetPackage:
+    needs: ReleaseDryRun
+    runs-on: ubuntu-latest
+    if: needs.ReleaseDryRun.outputs.RESULT == 'SUCCESS'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Prepare NuGet metadata
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const version = process.env.VERSION ?? '';
+            const releaseNotes = process.env.RELEASE_NOTES ?? '';
+            const runnerTemp = process.env.RUNNER_TEMP;
+
+            const packageVersionPattern =
+              /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+            if (version.length > 128 || !packageVersionPattern.test(version)) {
+              throw new Error(
+                'Release version is not a valid SemVer-shaped package version.'
+              );
+            }
+
+            if (!runnerTemp) {
+              throw new Error('RUNNER_TEMP is not available.');
+            }
+
+            const invalidXml10Character =
+              /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
+
+            if (invalidXml10Character.test(releaseNotes)) {
+              throw new Error(
+                'Release notes contain characters that are invalid in XML 1.0.'
+              );
+            }
+
+            const maximumReleaseNotesSize = 8 * 1024;
+            const releaseNotesSize = Buffer.byteLength(releaseNotes, 'utf8');
+
+            if (releaseNotesSize > maximumReleaseNotesSize) {
+              throw new Error(
+                `Release notes exceed ${maximumReleaseNotesSize} UTF-8 bytes.`
+              );
+            }
+
+            const releaseNotesFile = path.join(
+              runnerTemp,
+              'release-notes.txt'
+            );
+
+            fs.writeFileSync(releaseNotesFile, releaseNotes, {
+              encoding: 'utf8',
+              flag: 'w',
+              mode: 0o600
+            });
+
+            console.log('NuGet metadata prepared.');
+            console.log(`Release version: ${version}`);
+            console.log(`Release notes size: ${releaseNotesSize} UTF-8 bytes`);
+      - name: Build NuGet package
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        run: |
+          echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
+
+          echo ========== update ${FILE_CHANGELOG} files ==========
+          DATE=`date +%Y-%m-%d`
+          head -1 ${FILE_CHANGELOG} > .temp.md
+          {
+            printf '\n## %s - v%s\n\n' "${DATE}" "${VERSION}"
+            printf '%s\n' "${RELEASE_NOTES}"
+          } >> .temp.md
+          tail -n +2 ${FILE_CHANGELOG} >> .temp.md
+          mv -f .temp.md ${FILE_CHANGELOG}
+          cat ${FILE_CHANGELOG}
+
+          echo ========== Build NuGet package ==========
+          dotnet pack "${NUGET_PROJECT_FILE}" \
+            --configuration Release \
+            --output ./ \
+            -p:PackageVersion="${VERSION}" \
+            -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
+          la -la
