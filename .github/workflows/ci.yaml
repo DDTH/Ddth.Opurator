@@ -16,6 +16,7 @@ env:
   FILE_CHANGELOG: 'RELEASE-NOTES.md'
   DOTNET_VERSION: '6.x'
   NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
+  NUGET_PACKAGE_ID: 'Ddth.Opurator'
 
 jobs:
   BuildAndTest:
@@ -165,7 +166,7 @@ jobs:
         run: |
           echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
 
-          echo ========== Tpdate ${FILE_CHANGELOG} file ==========
+          echo ========== Update ${FILE_CHANGELOG} file ==========
           DATE=`date +%Y-%m-%d`
           head -1 ${FILE_CHANGELOG} > .temp.md
           {
@@ -174,7 +175,7 @@ jobs:
           } >> .temp.md
           tail -n +2 ${FILE_CHANGELOG} >> .temp.md
           mv -f .temp.md ${FILE_CHANGELOG}
-          cat ${FILE_CHANGELOG}
+          head -100 ${FILE_CHANGELOG}
 
           echo ========== Build NuGet package ==========
           dotnet pack "${NUGET_PROJECT_FILE}" \
@@ -182,4 +183,10 @@ jobs:
             --output ./ \
             -p:PackageVersion="${VERSION}" \
             -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
-          la -la
+
+          echo ========== Verify NuGet package ==========
+          FILE_TO_CHECK="${NUGET_PACKAGE_ID}.${VERSION}.nupkg"
+          if [ ! -f "${FILE_TO_CHECK}" ]; then
+            echo "❌ NuGet package ${FILE_TO_CHECK} does not exist."
+            exit 1
+          fi
