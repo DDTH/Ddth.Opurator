@@ -391,6 +391,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
         }
         catch (OperationCanceledException) when (_shutdownSource.IsCancellationRequested)
         {
+            return;
         }
         catch (Exception exception)
         {
@@ -534,9 +535,6 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
             try
             {
                 await timeoutMonitorTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeoutMonitorSource.IsCancellationRequested)
-            {
             }
             catch (Exception monitorException)
             {
@@ -840,13 +838,11 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
                 return CancellationRequestResult.AlreadyCompleted;
             }
 
-            if (record.Status == BackgroundTaskStatus.CancellationRequested)
+            if (record.Status == BackgroundTaskStatus.CancellationRequested
+                && (record.CancellationReason != BackgroundTaskCancellationReason.Timeout
+                    || reason == BackgroundTaskCancellationReason.Timeout))
             {
-                if (record.CancellationReason != BackgroundTaskCancellationReason.Timeout
-                    || reason == BackgroundTaskCancellationReason.Timeout)
-                {
-                    return CancellationRequestResult.AlreadyRequested;
-                }
+                return CancellationRequestResult.AlreadyRequested;
             }
 
             record.Generation++;

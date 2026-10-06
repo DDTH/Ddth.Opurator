@@ -2,13 +2,15 @@ name: "CodeQL"
 
 on:
   push:
-    branches: [ '*' ]
     paths:
       - 'Ddth.Opurator/**'
       - '.github/workflows/codeql.yaml'
       - '.github/codeql/codeql-config.yaml'
   pull_request:
-    branches: [ '*' ]
+    paths:
+      - 'Ddth.Opurator/**'
+      - '.github/workflows/codeql.yaml'
+      - '.github/codeql/codeql-config.yaml'
   schedule:
     # run every Saturday at 00:00 UTC
     - cron: '0 0 * * 6'
