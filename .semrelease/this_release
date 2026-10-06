@@ -1,10 +1,3 @@
-# This file has been cleaned up post-releasing version 0.0.0.
+# This file has been cleaned up post-releasing version 0.1.0.
 # Generate its content quickly using the following command:
 #   git log origin..HEAD | grep "^\s" > .semrelease/this_release
-#!VERSION=0.1.0
-- feat(execution): add bounded in-process background task execution
-- feat(scheduling): support delayed one-shot tasks and configurable repeat schedules
-- feat(repeat): prevent overlapping runs with configurable failure handling
-- feat(observability): expose typed results, task snapshots, and run history
-- feat(lifecycle): add per-run timeouts, cancellation, and graceful shutdown
-- feat(di): add IServiceCollection registration for IBackgroundTaskManager
