@@ -57,6 +57,7 @@ jobs:
     needs: [ ReleaseDryRun ]
     permissions:
       contents: write # to be able to publish a GitHub release
+      id-token: write # GitHub OIDC permission
     outputs:
       RESULT: ${{ needs.ReleaseDryRun.outputs.RESULT }}
       VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
