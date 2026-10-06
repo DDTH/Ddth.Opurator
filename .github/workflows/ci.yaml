@@ -13,6 +13,7 @@ permissions:
 
 env:
   TAG_PREFIX: v
+  FILE_CHANGELOG: 'RELEASE-NOTES.md'
   DOTNET_VERSION: '6.x'
   NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
 
@@ -164,7 +165,7 @@ jobs:
         run: |
           echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
 
-          echo ========== update ${FILE_CHANGELOG} files ==========
+          echo ========== Tpdate ${FILE_CHANGELOG} file ==========
           DATE=`date +%Y-%m-%d`
           head -1 ${FILE_CHANGELOG} > .temp.md
           {

@@ -27,7 +27,6 @@
     <PropertyGroup Condition="'$(PackageReleaseNotesFile)' != '' and Exists('$(PackageReleaseNotesFile)')">
         <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(PackageReleaseNotesFile)'))</PackageReleaseNotes>
     </PropertyGroup>
-
     <Target Name="ValidatePackageReleaseNotesFile"
             BeforeTargets="Pack"
             Condition="'$(PackageReleaseNotesFile)' != ''">

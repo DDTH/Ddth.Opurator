@@ -141,7 +141,7 @@ jobs:
         run: |
           echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
 
-          echo ========== update ${FILE_CHANGELOG} files ==========
+          echo ========== Update ${FILE_CHANGELOG} file ==========
           DATE=`date +%Y-%m-%d`
           head -1 ${FILE_CHANGELOG} > .temp.md
           {
@@ -151,7 +151,7 @@ jobs:
           tail -n +2 ${FILE_CHANGELOG} >> .temp.md
           mv -f .temp.md ${FILE_CHANGELOG}
 
-          echo ========== update .md files ==========
+          echo ========== Update .md files ==========
           sed -i -E "s/<<VERSION>>/v${VERSION}/" ./*.md
 
           echo ========== Build and Publish NuGet package ==========
@@ -162,13 +162,13 @@ jobs:
             -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
           dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
 
-          echo ========== commit updates ==========
+          echo ========== Commit updates ==========
           git config --global user.email "<>"
           git config --global user.name "CI Build"
           git commit -am "Update metadata for new version ${VERSION}"
           git push origin ${BRANCH_TO_RELEASE}
 
-          echo ========== tag ==========
+          echo ========== Tag ==========
           git tag -f -a "${TAG_PREFIX}${VERSION}" -m "Release ${TAG_PREFIX}/v${VERSION}"
           git push origin "${TAG_PREFIX}${VERSION}" -f
           echo "✅ Done."
