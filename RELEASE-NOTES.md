@@ -1,1 +1,1 @@
-# Ddth.Opurator.Mylib release notes
+# Ddth.Opurator release notes
