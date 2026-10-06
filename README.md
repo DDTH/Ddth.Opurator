@@ -22,7 +22,7 @@ concurrency, status tracking, cooperative cancellation, and per-run timeouts.
 - **Built-in dependency injection:** registers an application-wide manager for
   container-managed lifetime in ASP.NET Core and Blazor WebAssembly applications.
 
-## Quick User Guide
+## Getting Started
 
 ### Installation
 
@@ -68,6 +68,7 @@ immediately or after a delay and can optionally return a typed result:
 var oneShotHandle = manager.RunOnce(
     async cancellationToken =>
     {
+        // Simulate a long-running asynchronous operation.
         await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
         return 42;
     },
