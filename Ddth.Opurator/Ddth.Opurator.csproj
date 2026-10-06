@@ -25,7 +25,8 @@
     </PropertyGroup>
 
     <PropertyGroup>
-        <PackageReleaseNotes>${RELEASE-NOTES}</PackageReleaseNotes>
+        <!-- <PackageReleaseNotes>${RELEASE-NOTES}</PackageReleaseNotes> -->
+        <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(PackageReleaseNotesFile)'))</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>
