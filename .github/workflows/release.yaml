@@ -68,8 +68,8 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-      # New NuGet flow using Trusted publishing
       - name: NuGet login (OIDC → temp API key)
+        # New NuGet Trusted Publishing workflow (ref https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing#github-actions-setup)
         uses: NuGet/login@v1
         id: nuget_login
         with:
@@ -96,11 +96,10 @@ jobs:
             content = content.replace(/\$\{RELEASE_NOTES\}/g, releaseNotes);
             fs.writeFileSync('${{ env.NUGET_PROJECT_FILE }}.final', content);
       - name: Publish NuGet package
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
         run: |
-          RESULT='${{ needs.ReleaseDryRun.outputs.RESULT }}'
-          VERSION='${{ needs.ReleaseDryRun.outputs.VERSION }}'
-          RELEASE_NOTES='${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}'
-
           echo "🕘 Updating other metadata..."
 
           DATE=`date +%Y-%m-%d`
