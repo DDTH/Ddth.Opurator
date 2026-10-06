@@ -24,10 +24,16 @@
         <RepositoryType>git</RepositoryType>
     </PropertyGroup>
 
-    <PropertyGroup>
-        <!-- <PackageReleaseNotes>${RELEASE-NOTES}</PackageReleaseNotes> -->
+    <PropertyGroup Condition="'$(PackageReleaseNotesFile)' != '' and Exists('$(PackageReleaseNotesFile)')">
         <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(PackageReleaseNotesFile)'))</PackageReleaseNotes>
     </PropertyGroup>
+
+    <Target Name="ValidatePackageReleaseNotesFile"
+            BeforeTargets="Pack"
+            Condition="'$(PackageReleaseNotesFile)' != ''">
+        <Error Condition="!Exists('$(PackageReleaseNotesFile)')"
+            Text="Package release-notes file '$(PackageReleaseNotesFile)' does not exist." />
+    </Target>
 
     <ItemGroup>
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="6.0.0" />
