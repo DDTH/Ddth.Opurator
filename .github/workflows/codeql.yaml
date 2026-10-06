@@ -4,7 +4,7 @@ on:
   push:
     branches: [ '*' ]
     paths:
-      - 'Ddth.Opurator.Mylib/**'
+      - 'Ddth.Opurator/**'
       - '.github/workflows/codeql.yaml'
       - '.github/codeql/codeql-config.yaml'
   pull_request:

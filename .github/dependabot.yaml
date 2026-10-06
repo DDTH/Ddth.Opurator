@@ -11,8 +11,8 @@ updates:
 
   - package-ecosystem: "nuget"
     directories:
-      - "/Ddth.Opurator.Mylib"
-      - "/Ddth.Opurator.Mylib.Tests"
+      - "/Ddth.Opurator"
+      - "/Ddth.Opurator.Tests"
     schedule:
       interval: "weekly"
       day: "saturday"
