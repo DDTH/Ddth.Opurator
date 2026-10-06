@@ -1128,6 +1128,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
     {
         while (_scheduleChanged.Wait(0))
         {
+            // Drain all pending signals before recalculating the scheduler wait.
         }
     }
 
