@@ -2,17 +2,15 @@ name: 'ci'
 
 on:
   push:
-    branches: [ '*' ]
   pull_request:
     types: [ opened, edited, reopened, synchronize, review_requested ]
-    branches: [ '*' ]
   workflow_call:
 
 permissions:
   contents: read
 
 env:
-  TAG_PREFIX: v
+  TAG_PREFIX: 'v'
   FILE_CHANGELOG: 'RELEASE-NOTES.md'
   DOTNET_VERSION: '6.x'
   NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
@@ -63,7 +61,6 @@ jobs:
 
   ReleaseDryRun:
     if: github.event_name == 'push'
-    needs: BuildAndTest
     runs-on: ubuntu-latest
     outputs:
       RESULT: ${{ steps.release_dry_run.outputs.result }}
@@ -90,7 +87,7 @@ jobs:
           tag-only: true
 
   TestNuGetPackage:
-    needs: ReleaseDryRun
+    needs: [ BuildAndTest, ReleaseDryRun ]
     runs-on: ubuntu-latest
     if: needs.ReleaseDryRun.outputs.RESULT == 'SUCCESS'
     steps:

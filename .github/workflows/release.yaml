@@ -150,6 +150,7 @@ jobs:
           } >> .temp.md
           tail -n +2 ${FILE_CHANGELOG} >> .temp.md
           mv -f .temp.md ${FILE_CHANGELOG}
+          head -100 ${FILE_CHANGELOG}
 
           echo ========== Update .md files ==========
           sed -i -E "s/<<VERSION>>/v${VERSION}/" ./*.md
@@ -190,8 +191,9 @@ jobs:
             });
             console.log('✅ Created release: ', release);
       - name: Cleanup file .semrelease/this_release
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
         run: |
-          VERSION='${{ needs.ReleaseDryRun.outputs.VERSION }}'
           echo "🕘 Cleaning up file .semrelease/this_release..."
           echo "# This file has been cleaned up post-releasing version ${VERSION}." > .semrelease/this_release
           echo "# Generate its content quickly using the following command:" >> .semrelease/this_release

@@ -15,7 +15,7 @@
         <PackageTags>background-tasks;task-scheduler;concurrency</PackageTags>
         <PackageProjectUrl>https://github.com/DDTH/Ddth.Opurator</PackageProjectUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <Copyright>Copyright (c) DDTH</Copyright>
+        <Copyright>Copyright (c) 2026 DDTH</Copyright>
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
