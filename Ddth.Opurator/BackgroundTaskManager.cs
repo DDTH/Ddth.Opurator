@@ -59,10 +59,10 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
                 SingleWriter = true
             });
 
-        _schedulerTask = Task.Run(SchedulerLoopAsync);
+        _schedulerTask = StartInternalTask(SchedulerLoopAsync);
         _workerTasks = Enumerable
             .Range(0, MaxConcurrency)
-            .Select(_ => Task.Run(WorkerLoopAsync))
+            .Select(_ => StartInternalTask(WorkerLoopAsync))
             .ToArray();
     }
 
@@ -256,6 +256,21 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
     public async ValueTask DisposeAsync()
     {
         await EnsureShutdownStarted().ConfigureAwait(false);
+    }
+
+    private static Task StartInternalTask(Func<Task> operation)
+    {
+        // Task.Run captures ExecutionContext by default; avoid retaining ambient
+        // identity, tenant, or request state from the singleton's first resolver.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            return Task.Run(operation);
+        }
+
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(operation);
+        }
     }
 
     private TaskRecord CreateRecord(
@@ -1092,7 +1107,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
             }
 
             _acceptingTasks = false;
-            _shutdownTask = Task.Run(ShutdownCoreAsync);
+            _shutdownTask = StartInternalTask(ShutdownCoreAsync);
             return _shutdownTask;
         }
     }

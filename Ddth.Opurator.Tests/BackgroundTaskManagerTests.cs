@@ -15,6 +15,38 @@ public class BackgroundTaskManagerTests
     }
 
     [Fact]
+    public async Task Constructor_DoesNotFlowAmbientContextIntoOperations()
+    {
+        var ambientValue = new AsyncLocal<string?>();
+        ambientValue.Value = "creator-context";
+
+        await using var manager = CreateManager();
+        ambientValue.Value = null;
+
+        var handle = manager.RunOnce(
+            _ => Task.FromResult(ambientValue.Value));
+        var result = await handle.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Constructor_AllowsAlreadySuppressedExecutionContextFlow()
+    {
+        BackgroundTaskManager manager;
+
+        using (ExecutionContext.SuppressFlow())
+        {
+            manager = CreateManager();
+        }
+
+        await using var ownedManager = manager;
+        var handle = ownedManager.RunOnce(_ => Task.CompletedTask);
+
+        await handle.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task RunOnce_ReturnsTypedResultAndCompletedSnapshot()
     {
         await using var manager = CreateManager();
