@@ -3,3 +3,4 @@
 #   git log origin..HEAD | grep "^\s" > .semrelease/this_release
 #!VERSION=0.1.1
 - fix(CodeQL): fix CodeQL warnings
+- patch(ghcp-agents): upgrade GHCP agents
