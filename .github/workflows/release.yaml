@@ -20,6 +20,7 @@ env:
 jobs:
   CallCI:
     uses: ./.github/workflows/ci.yaml
+    secrets: inherit
 
   ReleaseDryRun:
     runs-on: ubuntu-latest
@@ -69,6 +70,13 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Choose .NET version
+        run: |
+          VERSION=$(echo ${{ matrix.dotnet }} | sed -E "s/^([0-9]+).*/\1/")
+          echo {\"sdk\": {\"version\": \"${VERSION}\"}} > global.json
+          cat global.json
+      - name: Display dotnet version
+        run: dotnet --version
       - name: NuGet login (OIDC → temp API key)
         # New NuGet Trusted Publishing workflow (ref https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing#github-actions-setup)
         uses: NuGet/login@v1
@@ -173,23 +181,15 @@ jobs:
           git tag -f -a "${TAG_PREFIX}${VERSION}" -m "Release ${TAG_PREFIX}/v${VERSION}"
           git push origin "${TAG_PREFIX}${VERSION}" -f
           echo "✅ Done."
-      - name: Create release
-        uses: actions/github-script@v9
-        env:
-          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
-          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+      - name: SemRelease
+        uses: btnguyen2k/action-semrelease@v4
         with:
-          script: |
-            const {data: release} = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: process.env['TAG_PREFIX'] + process.env['VERSION'],
-              name: process.env['TAG_PREFIX'] + process.env['VERSION'],
-              body: process.env['RELEASE_NOTES'],
-              draft: false,
-              prerelease: false,
-            });
-            console.log('✅ Created release: ', release);
+          auto-mode: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          tag-major-release: false
+          tag-minor-release: false
+          branches: ${{ env.BRANCH_TO_RELEASE }}
+          tag-prefix: ${{ env.TAG_PREFIX }}
       - name: Cleanup file .semrelease/this_release
         env:
           VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
