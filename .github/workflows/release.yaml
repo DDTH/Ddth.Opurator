@@ -7,6 +7,10 @@ on:
     types: [ closed ]
     branches: [ release ]
 
+concurrency:
+  group: release-${{ github.repository }}-${{ github.event.pull_request.base.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -31,9 +35,17 @@ jobs:
       RESULT: ${{ steps.release_dry_run.outputs.result }}
       VERSION: ${{ steps.release_dry_run.outputs.releaseVersion }}
       RELEASE_NOTES: ${{ steps.release_dry_run.outputs.releaseNotes }}
+      SOURCE_SHA: ${{ steps.source.outputs.sha }}
     steps:
-      - name: Checkout code
+      - name: Checkout release source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Capture release source
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Install Node
         uses: actions/setup-node@v7
         with:
@@ -63,26 +75,27 @@ jobs:
       RESULT: ${{ needs.ReleaseDryRun.outputs.RESULT }}
       VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
       RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+    env:
+      SOURCE_SHA: ${{ needs.ReleaseDryRun.outputs.SOURCE_SHA }}
     steps:
-      - name: Checkout code
+      - name: Checkout release source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Choose .NET version
+        shell: bash
         run: |
-          VERSION=$(echo ${{ matrix.dotnet }} | sed -E "s/^([0-9]+).*/\1/")
+          VERSION=$(echo ${{ env.DOTNET_VERSION }} | sed -E "s/^([0-9]+).*/\1/")
           echo {\"sdk\": {\"version\": \"${VERSION}\"}} > global.json
           cat global.json
       - name: Display dotnet version
+        shell: bash
         run: dotnet --version
-      - name: NuGet login (OIDC → temp API key)
-        # New NuGet Trusted Publishing workflow (ref https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing#github-actions-setup)
-        uses: NuGet/login@v1
-        id: nuget_login
-        with:
-          user: ${{ secrets.NUGET_USER }}
       - name: Prepare NuGet metadata
         uses: actions/github-script@v9
         env:
@@ -142,45 +155,166 @@ jobs:
             console.log('ℹ️ NuGet metadata prepared.');
             console.log(`ℹ️ Release version: ${version}`);
             console.log(`ℹ️ Release notes size: ${releaseNotesSize} UTF-8 bytes`);
-      - name: Publish NuGet package
+      - name: Prepare release commit
+        id: prepare_release
         env:
           VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
           RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        shell: bash
         run: |
-          echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
+          set -euo pipefail
 
-          echo ========== Update ${FILE_CHANGELOG} file ==========
-          DATE=`date +%Y-%m-%d`
-          head -1 ${FILE_CHANGELOG} > .temp.md
+          echo "🕘 Preparing release metadata..."
+
+          # Use a source-derived date so retries produce the same repository tree.
+          RELEASE_DATE=$(git show -s --format=%cs "${SOURCE_SHA}")
+          RELEASE_HEADING="## ${RELEASE_DATE} - v${VERSION}"
+
+          if grep -Fqx -- "${RELEASE_HEADING}" "${FILE_CHANGELOG}"; then
+            echo "${FILE_CHANGELOG} already contains ${RELEASE_HEADING}."
+          else
+            head -1 "${FILE_CHANGELOG}" > .temp.md
+            {
+              printf '\n%s\n\n' "${RELEASE_HEADING}"
+              printf '%s\n' "${RELEASE_NOTES}"
+            } >> .temp.md
+            tail -n +2 "${FILE_CHANGELOG}" >> .temp.md
+            mv -f .temp.md "${FILE_CHANGELOG}"
+          fi
+
+          echo "🕘 Updating version placeholders..."
+          sed -i -E "s/<<VERSION>>/v${VERSION}/g" ./*.md
+
+          echo "🕘 Cleaning .semrelease/this_release..."
           {
-            printf '\n## %s - v%s\n\n' "${DATE}" "${VERSION}"
-            printf '%s\n' "${RELEASE_NOTES}"
-          } >> .temp.md
-          tail -n +2 ${FILE_CHANGELOG} >> .temp.md
-          mv -f .temp.md ${FILE_CHANGELOG}
-          head -100 ${FILE_CHANGELOG}
+            printf '# This file has been cleaned up post-releasing version %s.\n' "${VERSION}"
+            printf '%s\n' '# Generate its content quickly using the following command:'
+            printf '%s\n' '#   git log origin..HEAD | grep "^\s" > .semrelease/this_release'
+          } > .semrelease/this_release
 
-          echo ========== Update .md files ==========
-          sed -i -E "s/<<VERSION>>/v${VERSION}/" ./*.md
-
-          echo ========== Build and Publish NuGet package ==========
-          dotnet pack "${NUGET_PROJECT_FILE}" \
-            --configuration Release \
-            --output ./ \
-            -p:PackageVersion="${VERSION}" \
-            -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
-          dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
-
-          echo ========== Commit updates ==========
           git config --global user.email "<>"
           git config --global user.name "CI Build"
-          git commit -am "Update metadata for new version ${VERSION}"
-          git push origin ${BRANCH_TO_RELEASE}
+          git add -u
 
-          echo ========== Tag ==========
-          git tag -f -a "${TAG_PREFIX}${VERSION}" -m "Release ${TAG_PREFIX}/v${VERSION}"
-          git push origin "${TAG_PREFIX}${VERSION}" -f
+          # Capture the expected tree before inspecting the remote branch.
+          PROPOSED_TREE=$(git write-tree)
+
+          git fetch --no-tags origin "refs/heads/${BRANCH_TO_RELEASE}"
+          REMOTE_SHA=$(git rev-parse FETCH_HEAD)
+
+          if [ "${REMOTE_SHA}" = "${SOURCE_SHA}" ]; then
+            if git diff --cached --quiet; then
+              RELEASE_COMMIT="${SOURCE_SHA}"
+              echo "No metadata commit is required."
+            else
+              git commit -m "Release ${TAG_PREFIX}${VERSION}"
+              RELEASE_COMMIT=$(git rev-parse HEAD)
+
+              # Explicit HEAD refspec is required because SOURCE_SHA was
+              # checked out in detached-HEAD mode.
+              git push origin "HEAD:refs/heads/${BRANCH_TO_RELEASE}"
+            fi
+          else
+            # A retry may find the release-preparation commit from an earlier
+            # attempt. Accept only one descendant commit with the exact tree
+            # this attempt would have produced.
+            if ! git merge-base --is-ancestor "${SOURCE_SHA}" "${REMOTE_SHA}"; then
+              echo "The release branch no longer descends from ${SOURCE_SHA}."
+              exit 1
+            fi
+
+            COMMIT_COUNT=$(git rev-list --count "${SOURCE_SHA}..${REMOTE_SHA}")
+            REMOTE_TREE=$(git rev-parse "${REMOTE_SHA}^{tree}")
+
+            if [ "${COMMIT_COUNT}" -ne 1 ] ||
+               [ "${REMOTE_TREE}" != "${PROPOSED_TREE}" ]; then
+              echo "The release branch changed after version calculation."
+              exit 1
+            fi
+
+            echo "Reusing the previously pushed release commit ${REMOTE_SHA}."
+            git reset --hard "${REMOTE_SHA}"
+            RELEASE_COMMIT="${REMOTE_SHA}"
+          fi
+
+          echo "commit=${RELEASE_COMMIT}" >> "$GITHUB_OUTPUT"
           echo "✅ Done."
+      - name: Build NuGet package
+        id: build_package
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_DIR="${RUNNER_TEMP}/my-package"
+          mkdir -p "${PACKAGE_DIR}"
+
+          dotnet pack "${NUGET_PROJECT_FILE}" \
+            --configuration Release \
+            --output "${PACKAGE_DIR}" \
+            -p:PackageVersion="${VERSION}" \
+            -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
+
+          mapfile -t PACKAGE_FILES < <(
+            find "${PACKAGE_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.nupkg' \
+              ! -name '*.symbols.nupkg'
+          )
+
+          if [ "${#PACKAGE_FILES[@]}" -ne 1 ]; then
+            echo "Expected exactly one NuGet package, found ${#PACKAGE_FILES[@]}."
+            exit 1
+          fi
+
+          echo "file=${PACKAGE_FILES[0]}" >> "$GITHUB_OUTPUT"
+      - name: Ensure immutable release tag
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_COMMIT: ${{ steps.prepare_release.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${TAG_PREFIX}${VERSION}"
+
+          if git ls-remote --exit-code --refs origin \
+               "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch --force origin \
+              "refs/tags/${TAG}:refs/tags/${TAG}"
+
+            EXISTING_COMMIT=$(git rev-list -n 1 "${TAG}")
+
+            if [ "${EXISTING_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+              echo "Tag ${TAG} already points to ${EXISTING_COMMIT}, not ${RELEASE_COMMIT}."
+              exit 1
+            fi
+
+            echo "Tag ${TAG} already points to the expected release commit."
+          else
+            git tag -a "${TAG}" "${RELEASE_COMMIT}" -m "Release ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+      - name: NuGet login (OIDC → temp API key)
+        # New NuGet Trusted Publishing workflow (ref https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing#github-actions-setup)
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Publish NuGet package
+        env:
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+          PACKAGE_FILE: ${{ steps.build_package.outputs.file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet nuget push "${PACKAGE_FILE}" \
+            --source "nuget.org" \
+            --api-key "${NUGET_API_KEY}" \
+            --skip-duplicate
       - name: SemRelease
         uses: btnguyen2k/action-semrelease@723927e059ae5b70543e81d7718fdda1df777e3c # v4.0.0
         with:
@@ -190,39 +324,63 @@ jobs:
           tag-minor-release: false
           branches: ${{ env.BRANCH_TO_RELEASE }}
           tag-prefix: ${{ env.TAG_PREFIX }}
-      - name: Cleanup file .semrelease/this_release
-        env:
-          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
-        run: |
-          echo "🕘 Cleaning up file .semrelease/this_release..."
-          echo "# This file has been cleaned up post-releasing version ${VERSION}." > .semrelease/this_release
-          echo "# Generate its content quickly using the following command:" >> .semrelease/this_release
-          echo "#   git log origin..HEAD | grep \"^\s\" > .semrelease/this_release" >> .semrelease/this_release
-          git config --global user.email "<>"
-          git config --global user.name "CI Build"
-          git commit -am "Cleanup file .semrelease/this_release post-releasing version ${VERSION}"
-          git push -f
-          echo "✅ Done."
 
   MergeToMain:
     runs-on: ubuntu-latest
     needs: [ Release ]
     permissions:
+      contents: read
       pull-requests: write # to be able to create PRs or comment on released PRs
     steps:
-      - uses: actions/github-script@v9
+      - name: Create merge-to-main PR if needed
+        uses: actions/github-script@v9
         env:
           VERSION: ${{ needs.Release.outputs.VERSION }}
           RELEASE_NOTES: ${{ needs.Release.outputs.RELEASE_NOTES }}
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const {data: pr} = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `Merge to main after releasing new version ${process['env']['VERSION']}`,
-              body: process['env']['RELEASE_NOTES'],
-              head: process['env']['BRANCH_TO_RELEASE'],
-              base: 'main',
-              maintainer_can_modify: true,
-            });
-            console.log('✅ Created PR: ', pr);
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = process.env.BRANCH_TO_RELEASE;
+            const base = 'main';
+
+            const { data: comparison } =
+              await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${base}...${head}`
+              });
+
+            if (comparison.ahead_by === 0) {
+              console.log(`ℹ️ ${base} already contains all commits from ${head}.`);
+              return;
+            }
+
+            const { data: existingPulls } =
+              await github.rest.pulls.list({
+                owner,
+                repo,
+                state: 'open',
+                head: `${owner}:${head}`,
+                base,
+                per_page: 100
+              });
+
+            if (existingPulls.length > 0) {
+              console.log(`⚠️ Using existing merge PR: ${existingPulls[0].html_url}`);
+              return;
+            }
+
+            const { data: pullRequest } =
+              await github.rest.pulls.create({
+                owner,
+                repo,
+                title: `Merge to main after releasing version ${process.env.VERSION}`,
+                body: process.env.RELEASE_NOTES,
+                head,
+                base,
+                maintainer_can_modify: true
+              });
+
+            console.log(`✅ Created merge PR: ${pullRequest.html_url}`);
