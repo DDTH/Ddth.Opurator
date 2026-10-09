@@ -5,6 +5,12 @@ on:
   pull_request:
     types: [ opened, edited, reopened, synchronize, review_requested ]
   workflow_call:
+    inputs:
+      SOURCE_SHA:
+        description: 'Exact commit to validate; defaults to the triggering commit.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -26,6 +32,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
       - name: Setup required .NET ${{ env.DOTNET_VERSION }} # always install the min .NET version required by the package
         uses: actions/setup-dotnet@v6
         with:
@@ -35,12 +43,32 @@ jobs:
         with:
           dotnet-version: ${{ matrix.dotnet }}
       - name: Choose .NET version
+        env:
+          REQUESTED_DOTNET_VERSION: ${{ matrix.dotnet }}
+        shell: bash
         run: |
-          VERSION=$(echo ${{ matrix.dotnet }} | sed -E "s/^([0-9]+).*/\1/")
-          echo {\"sdk\": {\"version\": \"${VERSION}\"}} > global.json
-          cat global.json
-      - name: Display .NET version
-        run: dotnet --version
+          set -euo pipefail
+
+          SDK_MAJOR="${REQUESTED_DOTNET_VERSION%%.*}"
+          SDK_VERSION=$(
+            dotnet --list-sdks |
+              awk -v prefix="${SDK_MAJOR}." \
+                '$1 ~ ("^" prefix) { print $1 }' |
+              sort -V |
+              tail -n 1
+          )
+
+          if [ -z "${SDK_VERSION}" ]; then
+            echo "❌ No installed .NET ${SDK_MAJOR}.x SDK was found."
+            exit 1
+          fi
+
+          printf \
+            '{"sdk":{"version":"%s","rollForward":"latestPatch"}}\n' \
+            "${SDK_VERSION}" \
+            > global.json
+
+          dotnet --version
       - name: Install dependencies
         run: dotnet restore
       - name: Build
@@ -69,6 +97,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
       - name: Install Node
         uses: actions/setup-node@v7
         with:
@@ -93,6 +123,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v6
         with:
@@ -160,7 +192,10 @@ jobs:
         env:
           VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
           RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
 
           echo ========== Update ${FILE_CHANGELOG} file ==========
