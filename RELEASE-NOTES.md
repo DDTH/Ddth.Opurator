@@ -1,5 +1,11 @@
 # Ddth.Opurator release notes
 
+## 2026-10-20 - v0.1.1
+
+### Fixed/Improvements
+
+- Fix(CodeQL): fix CodeQL warnings
+
 ## 2026-10-06 - v0.1.0
 
 ### Added/Refactoring/Deprecation

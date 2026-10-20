@@ -59,10 +59,10 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
                 SingleWriter = true
             });
 
-        _schedulerTask = Task.Run(SchedulerLoopAsync);
+        _schedulerTask = StartInternalTask(SchedulerLoopAsync);
         _workerTasks = Enumerable
             .Range(0, MaxConcurrency)
-            .Select(_ => Task.Run(WorkerLoopAsync))
+            .Select(_ => StartInternalTask(WorkerLoopAsync))
             .ToArray();
     }
 
@@ -258,6 +258,21 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
         await EnsureShutdownStarted().ConfigureAwait(false);
     }
 
+    private static Task StartInternalTask(Func<Task> operation)
+    {
+        // Task.Run captures ExecutionContext by default; avoid retaining ambient
+        // identity, tenant, or request state from the singleton's first resolver.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            return Task.Run(operation);
+        }
+
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(operation);
+        }
+    }
+
     private TaskRecord CreateRecord(
         BackgroundTaskKind kind,
         Func<CancellationToken, Task<object?>> operation,
@@ -391,6 +406,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
         }
         catch (OperationCanceledException) when (_shutdownSource.IsCancellationRequested)
         {
+            return;
         }
         catch (Exception exception)
         {
@@ -534,9 +550,6 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
             try
             {
                 await timeoutMonitorTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeoutMonitorSource.IsCancellationRequested)
-            {
             }
             catch (Exception monitorException)
             {
@@ -840,13 +853,11 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
                 return CancellationRequestResult.AlreadyCompleted;
             }
 
-            if (record.Status == BackgroundTaskStatus.CancellationRequested)
+            if (record.Status == BackgroundTaskStatus.CancellationRequested
+                && (record.CancellationReason != BackgroundTaskCancellationReason.Timeout
+                    || reason == BackgroundTaskCancellationReason.Timeout))
             {
-                if (record.CancellationReason != BackgroundTaskCancellationReason.Timeout
-                    || reason == BackgroundTaskCancellationReason.Timeout)
-                {
-                    return CancellationRequestResult.AlreadyRequested;
-                }
+                return CancellationRequestResult.AlreadyRequested;
             }
 
             record.Generation++;
@@ -1096,7 +1107,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
             }
 
             _acceptingTasks = false;
-            _shutdownTask = Task.Run(ShutdownCoreAsync);
+            _shutdownTask = StartInternalTask(ShutdownCoreAsync);
             return _shutdownTask;
         }
     }
@@ -1128,6 +1139,7 @@ public sealed class BackgroundTaskManager : IBackgroundTaskManager
     {
         while (_scheduleChanged.Wait(0))
         {
+            // Drain all pending signals before recalculating the scheduler wait.
         }
     }
 
