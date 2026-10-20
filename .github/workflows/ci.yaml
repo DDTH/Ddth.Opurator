@@ -2,17 +2,25 @@ name: 'ci'
 
 on:
   push:
-    branches: [ '*' ]
   pull_request:
     types: [ opened, edited, reopened, synchronize, review_requested ]
-    branches: [ '*' ]
   workflow_call:
+    inputs:
+      SOURCE_SHA:
+        description: 'Exact commit to validate; defaults to the triggering commit.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 env:
-  TAG_PREFIX: v
+  TAG_PREFIX: 'v'
+  FILE_CHANGELOG: 'RELEASE-NOTES.md'
+  DOTNET_VERSION: '6.x'
+  NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
+  NUGET_PACKAGE_ID: 'Ddth.Opurator'
 
 jobs:
   BuildAndTest:
@@ -24,21 +32,43 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Setup .NET 6.x # min .NET required by this project is 6.x
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
+      - name: Setup required .NET ${{ env.DOTNET_VERSION }} # always install the min .NET version required by the package
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '6.x'
+          dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Setup .NET ${{ matrix.dotnet }}
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ matrix.dotnet }}
       - name: Choose .NET version
+        env:
+          REQUESTED_DOTNET_VERSION: ${{ matrix.dotnet }}
+        shell: bash
         run: |
-          VERSION=$(echo ${{ matrix.dotnet }} | sed -E "s/^([0-9]+).*/\1/")
-          echo {\"sdk\": {\"version\": \"${VERSION}\"}} > global.json
-          cat global.json
-      - name: Display .NET version
-        run: dotnet --version
+          set -euo pipefail
+
+          SDK_MAJOR="${REQUESTED_DOTNET_VERSION%%.*}"
+          SDK_VERSION=$(
+            dotnet --list-sdks |
+              awk -v prefix="${SDK_MAJOR}." \
+                '$1 ~ ("^" prefix) { print $1 }' |
+              sort -V |
+              tail -n 1
+          )
+
+          if [ -z "${SDK_VERSION}" ]; then
+            echo "❌ No installed .NET ${SDK_MAJOR}.x SDK was found."
+            exit 1
+          fi
+
+          printf \
+            '{"sdk":{"version":"%s","rollForward":"latestPatch"}}\n' \
+            "${SDK_VERSION}" \
+            > global.json
+
+          dotnet --version
       - name: Install dependencies
         run: dotnet restore
       - name: Build
@@ -59,7 +89,6 @@ jobs:
 
   ReleaseDryRun:
     if: github.event_name == 'push'
-    needs: BuildAndTest
     runs-on: ubuntu-latest
     outputs:
       RESULT: ${{ steps.release_dry_run.outputs.result }}
@@ -68,19 +97,129 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
       - name: Install Node
         uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
       - name: Release (dry-run)
         id: release_dry_run
-        uses: btnguyen2k/action-semrelease@v4
+        uses: btnguyen2k/action-semrelease@9a1f9152815b6ae99468911fb885c4d65942d29c # v5.0.0
         with:
           dry-run: true
-          auto-mode: true
+          target-sha: ${{ inputs.SOURCE_SHA || github.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           tag-major-release: false
           tag-minor-release: false
           branches: ${{ github.ref_name }}
           tag-prefix: ${{ env.TAG_PREFIX }}
           tag-only: true
+
+  TestNuGetPackage:
+    needs: [ BuildAndTest, ReleaseDryRun ]
+    runs-on: ubuntu-latest
+    if: needs.ReleaseDryRun.outputs.RESULT == 'SUCCESS'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.SOURCE_SHA || github.sha }}
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Prepare NuGet metadata
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const version = process.env.VERSION ?? '';
+            const releaseNotes = process.env.RELEASE_NOTES ?? '';
+            const runnerTemp = process.env.RUNNER_TEMP;
+
+            const packageVersionPattern =
+              /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+            if (version.length > 128 || !packageVersionPattern.test(version)) {
+              throw new Error(
+                'Release version is not a valid SemVer-shaped package version.'
+              );
+            }
+
+            if (!runnerTemp) {
+              throw new Error('RUNNER_TEMP is not available.');
+            }
+
+            const invalidXml10Character =
+              /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
+
+            if (invalidXml10Character.test(releaseNotes)) {
+              throw new Error(
+                'Release notes contain characters that are invalid in XML 1.0.'
+              );
+            }
+
+            const maximumReleaseNotesSize = 8 * 1024;
+            const releaseNotesSize = Buffer.byteLength(releaseNotes, 'utf8');
+
+            if (releaseNotesSize > maximumReleaseNotesSize) {
+              throw new Error(
+                `Release notes exceed ${maximumReleaseNotesSize} UTF-8 bytes.`
+              );
+            }
+
+            const releaseNotesFile = path.join(
+              runnerTemp,
+              'release-notes.txt'
+            );
+
+            fs.writeFileSync(releaseNotesFile, releaseNotes, {
+              encoding: 'utf8',
+              flag: 'w',
+              mode: 0o600
+            });
+
+            console.log('ℹ️ NuGet metadata prepared.');
+            console.log(`ℹ️ Release version: ${version}`);
+            console.log(`ℹ️ Release notes size: ${releaseNotesSize} UTF-8 bytes`);
+      - name: Build NuGet package
+        env:
+          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "🕘 Updating ${FILE_CHANGELOG} and other metadata..."
+
+          echo ========== Update ${FILE_CHANGELOG} file ==========
+          DATE=`date +%Y-%m-%d`
+          head -1 ${FILE_CHANGELOG} > .temp.md
+          {
+            printf '\n## %s - v%s\n\n' "${DATE}" "${VERSION}"
+            printf '%s\n' "${RELEASE_NOTES}"
+          } >> .temp.md
+          tail -n +2 ${FILE_CHANGELOG} >> .temp.md
+          mv -f .temp.md ${FILE_CHANGELOG}
+          head -100 ${FILE_CHANGELOG}
+
+          echo ========== Build NuGet package ==========
+          dotnet pack "${NUGET_PROJECT_FILE}" \
+            --configuration Release \
+            --output ./ \
+            -p:PackageVersion="${VERSION}" \
+            -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
+
+          echo ========== Verify NuGet package ==========
+          FILE_TO_CHECK="${NUGET_PACKAGE_ID}.${VERSION}.nupkg"
+          if [ ! -f "${FILE_TO_CHECK}" ]; then
+            echo "❌ NuGet package ${FILE_TO_CHECK} does not exist."
+            exit 1
+          fi
+          echo "✅ NuGet package ${FILE_TO_CHECK} exists."

@@ -5,182 +5,965 @@ name: 'release'
 on:
   pull_request:
     types: [ closed ]
-    branches: [ release ]
+    branches: [ release ] # Keep synchronized with env.BRANCH_TO_RELEASE.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged) && format('release-{0}-{1}', github.repository, github.event.pull_request.base.ref || 'release') || format('release-skip-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
   BRANCH_TO_RELEASE: 'release'
+  PENDING_BRANCH_PREFIX: 'release-pending'
+  SYNC_BRANCH_PREFIX: 'release-sync'
   TAG_PREFIX: 'v'
   FILE_CHANGELOG: 'RELEASE-NOTES.md'
   DOTNET_VERSION: '6.x'
   NUGET_PROJECT_FILE: 'Ddth.Opurator/Ddth.Opurator.csproj'
 
 jobs:
-  CallCI:
-    uses: ./.github/workflows/ci.yaml
-
-  ReleaseDryRun:
-    runs-on: ubuntu-latest
-    needs: [ CallCI ]
+  ResolveReleaseSource:
     if: |
-      github.event.pull_request.merged == true
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
     outputs:
-      RESULT: ${{ steps.release_dry_run.outputs.result }}
-      VERSION: ${{ steps.release_dry_run.outputs.releaseVersion }}
-      RELEASE_NOTES: ${{ steps.release_dry_run.outputs.releaseNotes }}
+      MODE: ${{ steps.resolve.outputs.mode }}
+      SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+      CANDIDATE_REF: ${{ steps.resolve.outputs.candidate_ref }}
+      CANDIDATE_SHA: ${{ steps.resolve.outputs.candidate_sha }}
     steps:
-      - name: Checkout code
+      - name: Checkout release branch
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BRANCH_TO_RELEASE }}
+          fetch-depth: 0
+      - name: Resolve pending candidate or latest release head
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A pending candidate always wins over newer branch commits so a
+          # partially published version keeps one immutable target and plan.
+          mapfile -t CANDIDATES < <(
+            git ls-remote --heads origin \
+              "refs/heads/${PENDING_BRANCH_PREFIX}/*" |
+              sort -k2
+          )
+
+          if [ "${#CANDIDATES[@]}" -gt 1 ]; then
+            echo "More than one pending release candidate exists:"
+            printf '  %s\n' "${CANDIDATES[@]}"
+            exit 1
+          fi
+
+          if [ "${#CANDIDATES[@]}" -eq 1 ]; then
+            CANDIDATE_SHA=$(awk '{print $1}' <<< "${CANDIDATES[0]}")
+            CANDIDATE_REF=$(awk '{print $2}' <<< "${CANDIDATES[0]}")
+
+            git fetch --no-tags origin \
+              "${CANDIDATE_REF}:refs/remotes/origin/release-candidate"
+
+            FETCHED_CANDIDATE=$(git rev-parse refs/remotes/origin/release-candidate)
+            if [ "${FETCHED_CANDIDATE}" != "${CANDIDATE_SHA}" ]; then
+              echo "The pending release candidate changed while it was being resolved."
+              exit 1
+            fi
+
+            PARENT_COUNT=$(
+              git rev-list --parents -n 1 "${CANDIDATE_SHA}" |
+                awk '{ print NF - 1 }'
+            )
+            if [ "${PARENT_COUNT}" -ne 1 ]; then
+              echo "The pending release candidate must have exactly one parent."
+              exit 1
+            fi
+
+            SOURCE_SHA=$(git rev-parse "${CANDIDATE_SHA}^")
+            STORED_SOURCE=$(
+              git show \
+                "${CANDIDATE_SHA}:.semrelease/pending/target-sha" |
+                tr -d '\r\n'
+            )
+
+            if [ "${STORED_SOURCE}" != "${SOURCE_SHA}" ]; then
+              echo "The pending release candidate target is inconsistent."
+              exit 1
+            fi
+
+            git fetch --no-tags origin "refs/heads/${BRANCH_TO_RELEASE}"
+            RELEASE_HEAD=$(git rev-parse FETCH_HEAD)
+
+            if ! git merge-base --is-ancestor \
+                 "${SOURCE_SHA}" "${RELEASE_HEAD}"; then
+              echo "The pending release target is no longer on ${BRANCH_TO_RELEASE}."
+              exit 1
+            fi
+
+            echo "mode=resume" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+            echo "candidate_ref=${CANDIDATE_REF}" >> "$GITHUB_OUTPUT"
+            echo "candidate_sha=${CANDIDATE_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Resuming pending release candidate ${CANDIDATE_REF}."
+          else
+            git fetch --no-tags origin "refs/heads/${BRANCH_TO_RELEASE}"
+            SOURCE_SHA=$(git rev-parse FETCH_HEAD)
+
+            echo "mode=new" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+            echo "candidate_ref=" >> "$GITHUB_OUTPUT"
+            echo "candidate_sha=" >> "$GITHUB_OUTPUT"
+            echo "Preparing a release from ${BRANCH_TO_RELEASE}@${SOURCE_SHA}."
+          fi
+
+  CallCI:
+    needs: [ ResolveReleaseSource ]
+    uses: ./.github/workflows/ci.yaml
+    with:
+      SOURCE_SHA: ${{ needs.ResolveReleaseSource.outputs.SOURCE_SHA }}
+    secrets: inherit
+
+  ReleasePlan:
+    runs-on: ubuntu-latest
+    needs: [ ResolveReleaseSource, CallCI ]
+    outputs:
+      RESULT: ${{ steps.plan.outputs.result }}
+      VERSION: ${{ steps.plan.outputs.version }}
+      RELEASE_NOTES: ${{ steps.plan.outputs.release_notes }}
+      SOURCE_SHA: ${{ needs.ResolveReleaseSource.outputs.SOURCE_SHA }}
+      MODE: ${{ needs.ResolveReleaseSource.outputs.MODE }}
+      CANDIDATE_REF: ${{ needs.ResolveReleaseSource.outputs.CANDIDATE_REF }}
+      CANDIDATE_SHA: ${{ needs.ResolveReleaseSource.outputs.CANDIDATE_SHA }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.ResolveReleaseSource.outputs.SOURCE_SHA }}
+          fetch-depth: 0
       - name: Install Node
+        if: needs.ResolveReleaseSource.outputs.MODE == 'new'
         uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
-      - name: Release (dry-run)
+      - name: Calculate release plan
+        if: needs.ResolveReleaseSource.outputs.MODE == 'new'
         id: release_dry_run
-        uses: btnguyen2k/action-semrelease@v4
+        uses: btnguyen2k/action-semrelease@9a1f9152815b6ae99468911fb885c4d65942d29c # v5.0.0
         with:
           dry-run: true
-          auto-mode: true
+          target-sha: ${{ needs.ResolveReleaseSource.outputs.SOURCE_SHA }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           tag-major-release: false
           tag-minor-release: false
           branches: ${{ env.BRANCH_TO_RELEASE }}
           tag-prefix: ${{ env.TAG_PREFIX }}
           tag-only: true
+      - name: Load pending release plan
+        if: needs.ResolveReleaseSource.outputs.MODE == 'resume'
+        id: pending_plan
+        env:
+          CANDIDATE_REF: ${{ needs.ResolveReleaseSource.outputs.CANDIDATE_REF }}
+          CANDIDATE_SHA: ${{ needs.ResolveReleaseSource.outputs.CANDIDATE_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin \
+            "${CANDIDATE_REF}:refs/remotes/origin/release-candidate"
+
+          FETCHED_CANDIDATE=$(git rev-parse refs/remotes/origin/release-candidate)
+          if [ "${FETCHED_CANDIDATE}" != "${CANDIDATE_SHA}" ]; then
+            echo "The pending release candidate changed."
+            exit 1
+          fi
+
+          git show \
+            "${CANDIDATE_SHA}:.semrelease/pending/release-notes.md" \
+            > "${RUNNER_TEMP}/pending-release-notes.md"
+
+          VERSION=$(
+            git show \
+              "${CANDIDATE_SHA}:.semrelease/pending/version" |
+              tr -d '\r\n'
+          )
+
+          echo "result=SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Normalize release plan
+        id: plan
+        env:
+          MODE: ${{ needs.ResolveReleaseSource.outputs.MODE }}
+          NEW_RESULT: ${{ steps.release_dry_run.outputs.result }}
+          NEW_VERSION: ${{ steps.release_dry_run.outputs.releaseVersion }}
+          NEW_RELEASE_NOTES: ${{ steps.release_dry_run.outputs.releaseNotes }}
+          PENDING_RESULT: ${{ steps.pending_plan.outputs.result }}
+          PENDING_VERSION: ${{ steps.pending_plan.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${MODE}" = "resume" ]; then
+            RESULT="${PENDING_RESULT}"
+            VERSION="${PENDING_VERSION}"
+            RELEASE_NOTES=$(cat "${RUNNER_TEMP}/pending-release-notes.md")
+          else
+            RESULT="${NEW_RESULT}"
+            VERSION="${NEW_VERSION}"
+            RELEASE_NOTES="${NEW_RELEASE_NOTES}"
+          fi
+
+          DELIMITER="RELEASE_NOTES_$(cat /proc/sys/kernel/random/uuid)"
+          {
+            echo "result=${RESULT}"
+            echo "version=${VERSION}"
+            echo "release_notes<<${DELIMITER}"
+            printf '%s\n' "${RELEASE_NOTES}"
+            echo "${DELIMITER}"
+          } >> "$GITHUB_OUTPUT"
 
   Release:
     runs-on: ubuntu-latest
-    if: |
-      (github.event.pull_request.merged == true) && (needs.ReleaseDryRun.outputs.RESULT == 'SUCCESS')
-    needs: [ ReleaseDryRun ]
+    needs: [ ResolveReleaseSource, ReleasePlan ]
+    if: needs.ReleasePlan.outputs.RESULT == 'SUCCESS'
     permissions:
-      contents: write # to be able to publish a GitHub release
-      id-token: write # GitHub OIDC permission
+      contents: write
+      id-token: write
     outputs:
-      RESULT: ${{ needs.ReleaseDryRun.outputs.RESULT }}
-      VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
-      RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+      PUBLISHED: ${{ steps.create_sync_branch.outputs.published }}
+      VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+      RELEASE_NOTES: ${{ needs.ReleasePlan.outputs.RELEASE_NOTES }}
+      RELEASE_COMMIT: ${{ steps.prepare_release.outputs.release_commit }}
+      CANDIDATE_REF: ${{ steps.prepare_release.outputs.candidate_ref }}
+      CANDIDATE_SHA: ${{ steps.prepare_release.outputs.candidate_sha }}
+      SYNC_BRANCH: ${{ steps.create_sync_branch.outputs.sync_branch }}
+      SYNC_COMMIT: ${{ steps.create_sync_branch.outputs.sync_commit }}
+    env:
+      SOURCE_SHA: ${{ needs.ReleasePlan.outputs.SOURCE_SHA }}
+      RELEASE_MODE: ${{ needs.ReleasePlan.outputs.MODE }}
     steps:
-      - uses: actions/checkout@v7
-      - name: Setup dotnet ${{ env.DOTNET_VERSION }}
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.ReleasePlan.outputs.SOURCE_SHA }}
+          fetch-depth: 0
+      - name: Prepare NuGet metadata
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleasePlan.outputs.RELEASE_NOTES }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const version = process.env.VERSION ?? '';
+            const releaseNotes = process.env.RELEASE_NOTES ?? '';
+            const runnerTemp = process.env.RUNNER_TEMP;
+
+            const packageVersionPattern =
+              /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+            if (version.length > 128 || !packageVersionPattern.test(version)) {
+              throw new Error(
+                'Release version is not a valid SemVer-shaped package version.'
+              );
+            }
+
+            if (!runnerTemp) {
+              throw new Error('RUNNER_TEMP is not available.');
+            }
+
+            const invalidXml10Character =
+              /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
+
+            if (invalidXml10Character.test(releaseNotes)) {
+              throw new Error(
+                'Release notes contain characters that are invalid in XML 1.0.'
+              );
+            }
+
+            const maximumReleaseNotesSize = 8 * 1024;
+            const releaseNotesSize = Buffer.byteLength(releaseNotes, 'utf8');
+
+            if (releaseNotesSize > maximumReleaseNotesSize) {
+              throw new Error(
+                `Release notes exceed ${maximumReleaseNotesSize} UTF-8 bytes.`
+              );
+            }
+
+            const releaseNotesFile = path.join(
+              runnerTemp,
+              'release-notes.txt'
+            );
+
+            fs.writeFileSync(releaseNotesFile, releaseNotes, {
+              encoding: 'utf8',
+              flag: 'w',
+              mode: 0o600
+            });
+
+            console.log(`Release version: ${version}`);
+            console.log(`Release notes size: ${releaseNotesSize} UTF-8 bytes`);
+      - name: Prepare resumable release candidate
+        id: prepare_release
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleasePlan.outputs.RELEASE_NOTES }}
+          EXISTING_CANDIDATE_REF: ${{ needs.ReleasePlan.outputs.CANDIDATE_REF }}
+          EXISTING_CANDIDATE_SHA: ${{ needs.ReleasePlan.outputs.CANDIDATE_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config --global user.email "<>"
+          git config --global user.name "CI Build"
+
+          if [ "${RELEASE_MODE}" = "resume" ]; then
+            git fetch --no-tags origin \
+              "${EXISTING_CANDIDATE_REF}:refs/remotes/origin/release-candidate"
+
+            CANDIDATE_SHA=$(
+              git rev-parse refs/remotes/origin/release-candidate
+            )
+            if [ "${CANDIDATE_SHA}" != "${EXISTING_CANDIDATE_SHA}" ]; then
+              echo "The pending release candidate changed."
+              exit 1
+            fi
+
+            RELEASE_COMMIT=$(git rev-parse "${CANDIDATE_SHA}^")
+            if [ "${RELEASE_COMMIT}" != "${SOURCE_SHA}" ]; then
+              echo "The pending release candidate target changed."
+              exit 1
+            fi
+
+            STORED_VERSION=$(
+              git show \
+                "${CANDIDATE_SHA}:.semrelease/pending/version" |
+                tr -d '\r\n'
+            )
+            if [ "${STORED_VERSION}" != "${VERSION}" ]; then
+              echo "The pending release version changed."
+              exit 1
+            fi
+
+            CANDIDATE_REF="${EXISTING_CANDIDATE_REF}"
+          else
+            RELEASE_DATE=$(git show -s --format=%cs "${SOURCE_SHA}")
+            RELEASE_HEADING="## ${RELEASE_DATE} - v${VERSION}"
+
+            if grep -Fqx -- "${RELEASE_HEADING}" "${FILE_CHANGELOG}"; then
+              echo "${FILE_CHANGELOG} already contains ${RELEASE_HEADING}."
+            else
+              head -1 "${FILE_CHANGELOG}" > .temp.md
+              {
+                printf '\n%s\n\n' "${RELEASE_HEADING}"
+                printf '%s\n' "${RELEASE_NOTES}"
+              } >> .temp.md
+              tail -n +2 "${FILE_CHANGELOG}" >> .temp.md
+              mv -f .temp.md "${FILE_CHANGELOG}"
+            fi
+
+            sed -i -E "s/<<VERSION>>/v${VERSION}/g" ./*.md
+            git add -u
+
+            git fetch --no-tags origin "refs/heads/${BRANCH_TO_RELEASE}"
+            REMOTE_SHA=$(git rev-parse FETCH_HEAD)
+
+            if [ "${REMOTE_SHA}" != "${SOURCE_SHA}" ]; then
+              echo "The release branch advanced to ${REMOTE_SHA}."
+              echo "A queued workflow will calculate a release from the newer head."
+              echo "state=stale" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if git diff --cached --quiet; then
+              RELEASE_COMMIT="${SOURCE_SHA}"
+            else
+              git commit -m "Release ${TAG_PREFIX}${VERSION}"
+              RELEASE_COMMIT=$(git rev-parse HEAD)
+
+              if ! git push origin \
+                   "HEAD:refs/heads/${BRANCH_TO_RELEASE}"; then
+                git fetch --no-tags origin \
+                  "refs/heads/${BRANCH_TO_RELEASE}"
+                CURRENT_REMOTE=$(git rev-parse FETCH_HEAD)
+
+                if ! git merge-base --is-ancestor \
+                     "${RELEASE_COMMIT}" "${CURRENT_REMOTE}"; then
+                  echo "The release branch changed before the release commit was pushed."
+                  echo "A queued workflow will use the newer head."
+                  echo "state=stale" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+
+                echo "The release commit was pushed before the branch advanced."
+              fi
+            fi
+
+            CANDIDATE_REF="refs/heads/${PENDING_BRANCH_PREFIX}/${TAG_PREFIX}${VERSION}"
+
+            if git ls-remote --exit-code --heads origin \
+                 "${CANDIDATE_REF}" >/dev/null 2>&1; then
+              echo "Candidate ref ${CANDIDATE_REF} already exists unexpectedly."
+              exit 1
+            fi
+
+            git checkout --detach "${RELEASE_COMMIT}"
+            if [ -e .semrelease/pending ]; then
+              echo ".semrelease/pending already exists in the release tree."
+              exit 1
+            fi
+
+            mkdir -p .semrelease/pending
+            # This commit exists only on the temporary candidate ref. It makes
+            # retries independent from later changes on the release branch.
+            printf '%s\n' "${VERSION}" \
+              > .semrelease/pending/version
+            printf '%s' "${RELEASE_NOTES}" \
+              > .semrelease/pending/release-notes.md
+            printf '%s\n' "${RELEASE_COMMIT}" \
+              > .semrelease/pending/target-sha
+
+            git add .semrelease/pending
+            git commit -m "Record pending release ${TAG_PREFIX}${VERSION}"
+            CANDIDATE_SHA=$(git rev-parse HEAD)
+
+            if ! git push origin \
+                 "${CANDIDATE_SHA}:${CANDIDATE_REF}"; then
+              REMOTE_CANDIDATE=$(
+                git ls-remote --heads origin "${CANDIDATE_REF}" |
+                  awk '{print $1}'
+              )
+
+              if [ "${REMOTE_CANDIDATE}" != "${CANDIDATE_SHA}" ]; then
+                echo "Unable to create pending release candidate ${CANDIDATE_REF}."
+                exit 1
+              fi
+            fi
+
+            git reset --hard "${RELEASE_COMMIT}"
+          fi
+
+          RELEASE_INPUT_BLOB=$(
+            git rev-parse \
+              "${RELEASE_COMMIT}:.semrelease/this_release"
+          )
+
+          echo "state=ready" >> "$GITHUB_OUTPUT"
+          echo "release_commit=${RELEASE_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "release_input_blob=${RELEASE_INPUT_BLOB}" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref=${CANDIDATE_REF}" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=${CANDIDATE_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Report stale release plan
+        if: steps.prepare_release.outputs.state == 'stale'
+        shell: bash
+        run: |
+          echo "The release plan became stale before publication."
+          echo "No package, tag, or release was published by this run."
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        if: steps.prepare_release.outputs.state == 'ready'
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-      # New NuGet flow using Trusted publishing
-      - name: NuGet login (OIDC → temp API key)
+      - name: Choose .NET version
+        if: steps.prepare_release.outputs.state == 'ready'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_MAJOR="${DOTNET_VERSION%%.*}"
+          SDK_VERSION=$(
+            dotnet --list-sdks |
+              awk -v prefix="${SDK_MAJOR}." \
+                '$1 ~ ("^" prefix) { print $1 }' |
+              sort -V |
+              tail -n 1
+          )
+
+          if [ -z "${SDK_VERSION}" ]; then
+            echo "No installed .NET ${SDK_MAJOR}.x SDK was found."
+            exit 1
+          fi
+
+          printf \
+            '{"sdk":{"version":"%s","rollForward":"latestPatch"}}\n' \
+            "${SDK_VERSION}" \
+            > global.json
+
+          dotnet --version
+      - name: Build NuGet package
+        if: steps.prepare_release.outputs.state == 'ready'
+        id: build_package
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_DIR="${RUNNER_TEMP}/my-package"
+          mkdir -p "${PACKAGE_DIR}"
+
+          dotnet pack "${NUGET_PROJECT_FILE}" \
+            --configuration Release \
+            --output "${PACKAGE_DIR}" \
+            -p:PackageVersion="${VERSION}" \
+            -p:PackageReleaseNotesFile="${RUNNER_TEMP}/release-notes.txt"
+
+          mapfile -t PACKAGE_FILES < <(
+            find "${PACKAGE_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.nupkg' \
+              ! -name '*.symbols.nupkg'
+          )
+
+          if [ "${#PACKAGE_FILES[@]}" -ne 1 ]; then
+            echo "Expected exactly one NuGet package, found ${#PACKAGE_FILES[@]}."
+            exit 1
+          fi
+
+          echo "file=${PACKAGE_FILES[0]}" >> "$GITHUB_OUTPUT"
+      - name: Ensure immutable release tag
+        if: steps.prepare_release.outputs.state == 'ready'
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          RELEASE_COMMIT: ${{ steps.prepare_release.outputs.release_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${TAG_PREFIX}${VERSION}"
+
+          if git ls-remote --exit-code --refs origin \
+               "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch --force origin \
+              "refs/tags/${TAG}:refs/tags/${TAG}"
+
+            EXISTING_COMMIT=$(git rev-list -n 1 "${TAG}")
+
+            if [ "${EXISTING_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+              echo "Tag ${TAG} points to ${EXISTING_COMMIT}, not ${RELEASE_COMMIT}."
+              exit 1
+            fi
+          else
+            git tag -a "${TAG}" "${RELEASE_COMMIT}" -m "Release ${TAG}"
+
+            if ! git push origin "refs/tags/${TAG}"; then
+              git fetch --force origin \
+                "refs/tags/${TAG}:refs/tags/${TAG}"
+              EXISTING_COMMIT=$(git rev-list -n 1 "${TAG}")
+
+              if [ "${EXISTING_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+                echo "Tag ${TAG} was concurrently created at ${EXISTING_COMMIT}."
+                exit 1
+              fi
+            fi
+          fi
+      - name: NuGet login (OIDC to temporary API key)
+        if: steps.prepare_release.outputs.state == 'ready'
         uses: NuGet/login@v1
         id: nuget_login
         with:
           user: ${{ secrets.NUGET_USER }}
-      - name: Update NuGet metadata
-        uses: actions/github-script@v9
-        env:
-          RESULT: ${{ needs.ReleaseDryRun.outputs.RESULT }}
-          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
-          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
-        with:
-          script: |
-            console.log('🕘 Updating NuGet metadata...')
-            console.log(`   🐛 [DEBUG] RESULT: ${process.env['RESULT']}`);
-            console.log(`   🐛 [DEBUG] RELEASE VERSION: ${process.env['VERSION']}`);
-            console.log(`   🐛 [DEBUG] RELEASE NOTES: ${process.env['RELEASE_NOTES']}`);
-
-            var releaseNotes = process.env['RELEASE_NOTES'];
-            releaseNotes = releaseNotes.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            var fs = require('fs');
-            var content = fs.readFileSync('${{ env.NUGET_PROJECT_FILE }}', 'utf8');
-            content = content.replace(/<PackageVersion>0.0.0<\/PackageVersion>/g, `<PackageVersion>${process.env['VERSION']}</PackageVersion>`);
-            content = content.replace(/\$\{RELEASE-NOTES\}/g, releaseNotes);
-            content = content.replace(/\$\{RELEASE_NOTES\}/g, releaseNotes);
-            fs.writeFileSync('${{ env.NUGET_PROJECT_FILE }}.final', content);
       - name: Publish NuGet package
+        if: steps.prepare_release.outputs.state == 'ready'
+        env:
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+          PACKAGE_FILE: ${{ steps.build_package.outputs.file }}
+        shell: bash
         run: |
-          RESULT='${{ needs.ReleaseDryRun.outputs.RESULT }}'
-          VERSION='${{ needs.ReleaseDryRun.outputs.VERSION }}'
-          RELEASE_NOTES='${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}'
+          set -euo pipefail
 
-          echo "🕘 Updating other metadata..."
-
-          DATE=`date +%Y-%m-%d`
-          head -1 ${FILE_CHANGELOG} > .temp.md
-          echo -e "\n## ${DATE} - v${VERSION}\n\n${RELEASE_NOTES}" >> .temp.md
-          tail -n +2 ${FILE_CHANGELOG} >> .temp.md
-          mv -f .temp.md ${FILE_CHANGELOG}
-          echo ========== content of ${FILE_CHANGELOG} ==========
-          cat ${FILE_CHANGELOG}
-
-          echo ========== update .md files ==========
-          sed -i -E "s/<<VERSION>>/v${VERSION}/" ./*.md
-
-          echo ========== Build and Publish NuGet package ==========
-          cp -f ${{ env.NUGET_PROJECT_FILE }} ${{ env.NUGET_PROJECT_FILE }}.bak
-          mv -f ${{ env.NUGET_PROJECT_FILE }}.final ${{ env.NUGET_PROJECT_FILE }}
-          cat ${{ env.NUGET_PROJECT_FILE }}
-          dotnet pack --configuration=Release -o ./
-          dotnet nuget push *.nupkg --source "nuget.org" --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
-          mv -f ${{ env.NUGET_PROJECT_FILE }}.bak ${{ env.NUGET_PROJECT_FILE }}
-
-          echo ========== commit updates ==========
-          git config --global user.email "<>"
-          git config --global user.name "CI Build"
-          git commit -am "Update metadata for new version ${VERSION}"
-          git push origin ${BRANCH_TO_RELEASE}
-
-          echo ========== tag ==========
-          git tag -f -a "${TAG_PREFIX}${VERSION}" -m "Release ${TAG_PREFIX}/v${VERSION}"
-          git push origin "${TAG_PREFIX}${VERSION}" -f
-          echo "✅ Done."
-      - name: Create release
+          dotnet nuget push "${PACKAGE_FILE}" \
+            --source "nuget.org" \
+            --api-key "${NUGET_API_KEY}" \
+            --skip-duplicate
+      - name: Publish GitHub release
+        if: steps.prepare_release.outputs.state == 'ready'
         uses: actions/github-script@v9
         env:
-          VERSION: ${{ needs.ReleaseDryRun.outputs.VERSION }}
-          RELEASE_NOTES: ${{ needs.ReleaseDryRun.outputs.RELEASE_NOTES }}
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          RELEASE_NOTES: ${{ needs.ReleasePlan.outputs.RELEASE_NOTES }}
+          RELEASE_COMMIT: ${{ steps.prepare_release.outputs.release_commit }}
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const {data: release} = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: process.env['TAG_PREFIX'] + process.env['VERSION'],
-              name: process.env['TAG_PREFIX'] + process.env['VERSION'],
-              body: process.env['RELEASE_NOTES'],
-              draft: false,
-              prerelease: false,
-            });
-            console.log('✅ Created release: ', release);
-      - name: Cleanup file .semrelease/this_release
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const version = process.env.VERSION;
+            const tag = `${process.env.TAG_PREFIX}${version}`;
+            const body = process.env.RELEASE_NOTES ?? '';
+            const prerelease = version.includes('-');
+
+            let existingRelease;
+            try {
+              const response = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag
+              });
+              existingRelease = response.data;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
+
+            if (existingRelease) {
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existingRelease.id,
+                tag_name: tag,
+                target_commitish: process.env.RELEASE_COMMIT,
+                name: tag,
+                body,
+                draft: false,
+                prerelease
+              });
+
+              console.log(`Updated existing GitHub release ${tag}.`);
+            } else {
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                target_commitish: process.env.RELEASE_COMMIT,
+                name: tag,
+                body,
+                draft: false,
+                prerelease,
+                generate_release_notes: false
+              });
+
+              console.log(`Created GitHub release ${tag}.`);
+            }
+      - name: Clean consumed release instructions
+        if: steps.prepare_release.outputs.state == 'ready'
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          EXPECTED_INPUT_BLOB: ${{ steps.prepare_release.outputs.release_input_blob }}
+        shell: bash
         run: |
-          VERSION='${{ needs.ReleaseDryRun.outputs.VERSION }}'
-          echo "🕘 Cleaning up file .semrelease/this_release..."
-          echo "# This file has been cleaned up post-releasing version ${VERSION}." > .semrelease/this_release
-          echo "# Generate its content quickly using the following command:" >> .semrelease/this_release
-          echo "#   git log origin..HEAD | grep \"^\s\" > .semrelease/this_release" >> .semrelease/this_release
-          git config --global user.email "<>"
-          git config --global user.name "CI Build"
-          git commit -am "Cleanup file .semrelease/this_release post-releasing version ${VERSION}"
-          git push -f
-          echo "✅ Done."
+          set -euo pipefail
+
+          CLEANED_MARKER="# This file has been cleaned up post-releasing version ${VERSION}."
+
+          # Clean only the exact input consumed by this release. If a newer PR
+          # changed the file, its instructions belong to the next release.
+          for ATTEMPT in $(seq 1 10); do
+            git fetch --no-tags origin "refs/heads/${BRANCH_TO_RELEASE}"
+            REMOTE_SHA=$(git rev-parse FETCH_HEAD)
+            CURRENT_BLOB=$(
+              git rev-parse \
+                "${REMOTE_SHA}:.semrelease/this_release" \
+                2>/dev/null ||
+                true
+            )
+
+            git show \
+              "${REMOTE_SHA}:.semrelease/this_release" \
+              > "${RUNNER_TEMP}/current-this-release"
+
+            if grep -Fqx -- \
+                 "${CLEANED_MARKER}" \
+                 "${RUNNER_TEMP}/current-this-release"; then
+              echo "Release instructions are already clean."
+              exit 0
+            fi
+
+            if [ "${CURRENT_BLOB}" != "${EXPECTED_INPUT_BLOB}" ]; then
+              echo "Release instructions changed after this release was planned."
+              echo "They are preserved for the next queued release."
+              exit 0
+            fi
+
+            git checkout --detach "${REMOTE_SHA}"
+            {
+              printf '# This file has been cleaned up post-releasing version %s.\n' \
+                "${VERSION}"
+              printf '%s\n' '# Generate its content quickly using the following command:'
+              printf '%s\n' '#   git log origin..HEAD | grep "^\s" > .semrelease/this_release'
+            } > .semrelease/this_release
+
+            git add .semrelease/this_release
+            if git diff --cached --quiet; then
+              echo "Release instructions are already clean."
+              exit 0
+            fi
+
+            git commit -m "Clean release instructions after ${TAG_PREFIX}${VERSION}"
+
+            if git push origin \
+                 "HEAD:refs/heads/${BRANCH_TO_RELEASE}"; then
+              echo "Cleaned consumed release instructions."
+              exit 0
+            fi
+
+            echo "The release branch moved during cleanup attempt ${ATTEMPT}."
+          done
+
+          echo "Unable to clean consumed release instructions after 10 attempts."
+          exit 1
+      - name: Create immutable main-sync branch
+        if: steps.prepare_release.outputs.state == 'ready'
+        id: create_sync_branch
+        env:
+          VERSION: ${{ needs.ReleasePlan.outputs.VERSION }}
+          RELEASE_COMMIT: ${{ steps.prepare_release.outputs.release_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git checkout --detach "${RELEASE_COMMIT}"
+          # The PR uses a fixed per-version branch so later release-branch
+          # commits cannot enter the already-created PR.
+          {
+            printf '# This file has been cleaned up post-releasing version %s.\n' \
+              "${VERSION}"
+            printf '%s\n' '# Generate its content quickly using the following command:'
+            printf '%s\n' '#   git log origin..HEAD | grep "^\s" > .semrelease/this_release'
+          } > .semrelease/this_release
+
+          git add .semrelease/this_release
+          if git diff --cached --quiet; then
+            SYNC_COMMIT="${RELEASE_COMMIT}"
+          else
+            COMMIT_DATE=$(git show -s --format=%cI "${RELEASE_COMMIT}")
+            GIT_AUTHOR_DATE="${COMMIT_DATE}" \
+            GIT_COMMITTER_DATE="${COMMIT_DATE}" \
+              git commit -m "Clean release instructions after ${TAG_PREFIX}${VERSION}"
+            SYNC_COMMIT=$(git rev-parse HEAD)
+          fi
+
+          SYNC_BRANCH="${SYNC_BRANCH_PREFIX}/${TAG_PREFIX}${VERSION}"
+          SYNC_REF="refs/heads/${SYNC_BRANCH}"
+          REMOTE_SYNC=$(
+            git ls-remote --heads origin "${SYNC_REF}" |
+              awk '{print $1}'
+          )
+
+          if [ -n "${REMOTE_SYNC}" ]; then
+            if [ "${REMOTE_SYNC}" != "${SYNC_COMMIT}" ]; then
+              echo "Sync branch ${SYNC_BRANCH} already points to ${REMOTE_SYNC}."
+              exit 1
+            fi
+          else
+            if ! git push origin "${SYNC_COMMIT}:${SYNC_REF}"; then
+              REMOTE_SYNC=$(
+                git ls-remote --heads origin "${SYNC_REF}" |
+                  awk '{print $1}'
+              )
+
+              if [ "${REMOTE_SYNC}" != "${SYNC_COMMIT}" ]; then
+                echo "Unable to create immutable sync branch ${SYNC_BRANCH}."
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "sync_branch=${SYNC_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "sync_commit=${SYNC_COMMIT}" >> "$GITHUB_OUTPUT"
 
   MergeToMain:
     runs-on: ubuntu-latest
     needs: [ Release ]
+    if: needs.Release.outputs.PUBLISHED == 'true'
     permissions:
-      pull-requests: write # to be able to create PRs or comment on released PRs
+      contents: read
+      pull-requests: write
     steps:
-      - uses: actions/github-script@v9
+      - name: Create merge-to-main PR if needed
+        uses: actions/github-script@v9
         env:
           VERSION: ${{ needs.Release.outputs.VERSION }}
           RELEASE_NOTES: ${{ needs.Release.outputs.RELEASE_NOTES }}
+          SYNC_BRANCH: ${{ needs.Release.outputs.SYNC_BRANCH }}
+          SYNC_COMMIT: ${{ needs.Release.outputs.SYNC_COMMIT }}
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const {data: pr} = await github.rest.pulls.create({
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = process.env.SYNC_BRANCH;
+            const expectedHead = process.env.SYNC_COMMIT;
+            const base = 'main';
+
+            const { data: headRef } = await github.rest.git.getRef({
+              owner,
+              repo,
+              ref: `heads/${head}`
+            });
+
+            if (headRef.object.sha !== expectedHead) {
+              throw new Error(
+                `Sync branch ${head} moved from ${expectedHead} to ${headRef.object.sha}.`
+              );
+            }
+
+            const { data: comparison } =
+              await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${base}...${head}`
+              });
+
+            if (comparison.ahead_by === 0) {
+              console.log(`${base} already contains ${head}.`);
+              return;
+            }
+
+            const { data: existingPulls } =
+              await github.rest.pulls.list({
+                owner,
+                repo,
+                state: 'open',
+                head: `${owner}:${head}`,
+                base,
+                per_page: 100
+              });
+
+            if (existingPulls.length > 0) {
+              if (existingPulls[0].head.sha !== expectedHead) {
+                throw new Error(
+                  `Existing sync PR head moved to ${existingPulls[0].head.sha}.`
+                );
+              }
+
+              console.log(`Using existing merge PR: ${existingPulls[0].html_url}`);
+              return;
+            }
+
+            const { data: pullRequest } =
+              await github.rest.pulls.create({
+                owner,
+                repo,
+                title: `Merge published version ${process.env.VERSION} to main`,
+                body: process.env.RELEASE_NOTES,
+                head,
+                base,
+                maintainer_can_modify: false
+              });
+
+            console.log(`Created merge PR: ${pullRequest.html_url}`);
+
+  FinalizeRelease:
+    runs-on: ubuntu-latest
+    needs: [ Release, MergeToMain ]
+    if: |
+      (needs.Release.outputs.PUBLISHED == 'true') &&
+      (needs.MergeToMain.result == 'success')
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect newer release work
+        id: catch_up
+        env:
+          VERSION: ${{ needs.Release.outputs.VERSION }}
+          RELEASE_COMMIT: ${{ needs.Release.outputs.RELEASE_COMMIT }}
+          SYNC_BRANCH: ${{ needs.Release.outputs.SYNC_BRANCH }}
+          SYNC_COMMIT: ${{ needs.Release.outputs.SYNC_COMMIT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin \
+            "refs/heads/${BRANCH_TO_RELEASE}:refs/remotes/origin/release-head"
+          git fetch --no-tags origin \
+            "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/release-sync"
+
+          RELEASE_HEAD=$(git rev-parse refs/remotes/origin/release-head)
+          FETCHED_SYNC=$(git rev-parse refs/remotes/origin/release-sync)
+
+          if [ "${FETCHED_SYNC}" != "${SYNC_COMMIT}" ]; then
+            echo "The immutable sync branch moved."
+            exit 1
+          fi
+
+          if [ "${RELEASE_HEAD}" = "${RELEASE_COMMIT}" ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor \
+               "${RELEASE_COMMIT}" "${RELEASE_HEAD}"; then
+            echo "The release branch no longer contains ${RELEASE_COMMIT}."
+            exit 1
+          fi
+
+          COMMIT_COUNT=$(
+            git rev-list --count "${RELEASE_COMMIT}..${RELEASE_HEAD}"
+          )
+
+          if [ "${COMMIT_COUNT}" -eq 1 ]; then
+            ONLY_COMMIT=$(
+              git rev-list -n 1 "${RELEASE_COMMIT}..${RELEASE_HEAD}"
+            )
+            SUBJECT=$(git show -s --format=%s "${ONLY_COMMIT}")
+            RELEASE_TREE=$(git rev-parse "${RELEASE_HEAD}^{tree}")
+            SYNC_TREE=$(git rev-parse "${SYNC_COMMIT}^{tree}")
+
+            if [ "${SUBJECT}" = \
+                 "Clean release instructions after ${TAG_PREFIX}${VERSION}" ] &&
+               [ "${RELEASE_TREE}" = "${SYNC_TREE}" ]; then
+              echo "required=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "required=true" >> "$GITHUB_OUTPUT"
+      - name: Remove completed pending candidate
+        env:
+          CANDIDATE_REF: ${{ needs.Release.outputs.CANDIDATE_REF }}
+          CANDIDATE_SHA: ${{ needs.Release.outputs.CANDIDATE_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REMOTE_CANDIDATE=$(
+            git ls-remote --heads origin "${CANDIDATE_REF}" |
+              awk '{print $1}'
+          )
+
+          if [ -z "${REMOTE_CANDIDATE}" ]; then
+            echo "Pending release candidate is already removed."
+            exit 0
+          fi
+
+          if [ "${REMOTE_CANDIDATE}" != "${CANDIDATE_SHA}" ]; then
+            echo "Pending release candidate moved to ${REMOTE_CANDIDATE}."
+            exit 1
+          fi
+
+          git push \
+            --force-with-lease="${CANDIDATE_REF}:${CANDIDATE_SHA}" \
+            origin \
+            ":${CANDIDATE_REF}"
+
+          echo "Removed completed pending release candidate."
+      - name: Queue a catch-up release check
+        if: steps.catch_up.outputs.required == 'true'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // A run that resumed an older candidate may have consumed the
+            // newest queued PR event. Recheck the latest release-branch head.
+            await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Merge to main after releasing new version ${process['env']['VERSION']}`,
-              body: process['env']['RELEASE_NOTES'],
-              head: process['env']['BRANCH_TO_RELEASE'],
-              base: 'main',
-              maintainer_can_modify: true,
+              workflow_id: 'release-fixed.yaml',
+              ref: context.payload.repository.default_branch
             });
-            console.log('✅ Created PR: ', pr);
+
+            console.log('Queued a catch-up release check.');
